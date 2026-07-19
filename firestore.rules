@@ -1,0 +1,11 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    match /users/{userId} {
+      allow read, write: if request.auth != null
+        && request.auth.uid == userId
+        && (!('players' in request.resource.data) || request.resource.data.players is list)
+        && (!('gameResults' in request.resource.data) || request.resource.data.gameResults is list);
+    }
+  }
+}

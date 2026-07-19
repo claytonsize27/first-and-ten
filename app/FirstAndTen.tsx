@@ -6,6 +6,8 @@ import {
   cardStr, displaySpot, fgMinRank, fieldGoalGood, interceptionStart, ordinal,
   playerStats, puntDistance, resolveMatch, valueOf, yd,
 } from "./game-engine";
+import type { User } from "firebase/auth";
+import { cloudConfigured, saveCloudState, signInToCloud, signOutOfCloud, watchAuth, watchCloudState } from "./cloud-store";
 
 type Team = "p1" | "p2";
 type Phase = "home" | "names" | "possession" | "play" | "pat" | "onsideChoice" | "suddenDeathStart" | "gameOver" | "history";
@@ -33,27 +35,45 @@ const uid = () => globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.ran
 export default function FirstAndTen() {
   const [session, setSession] = useState<Session>(() => initial());
   const [undoStack, setUndoStack] = useState<Session[]>([]);
-  const [players, setPlayers] = useState<PlayerProfile[]>([]);
-  const [games, setGames] = useState<GameResult[]>([]);
+  const readCache = <T,>(key: string): T[] => { try { const value = JSON.parse(localStorage.getItem(key) || "[]"); return Array.isArray(value) ? value : []; } catch { return []; } };
+  const [players, setPlayers] = useState<PlayerProfile[]>(() => readCache<PlayerProfile>("first-ten-players"));
+  const [games, setGames] = useState<GameResult[]>(() => readCache<GameResult>("first-ten-results"));
   const [selected, setSelected] = useState<Record<Team, string>>({ p1: "", p2: "" });
   const [newNames, setNewNames] = useState<Record<Team, string>>({ p1: "", p2: "" });
   const [offCard, setOffCard] = useState<Partial<Card>>({});
   const [defCard, setDefCard] = useState<Partial<Card>>({});
   const [drawColor, setDrawColor] = useState<CardColor | null>(null);
   const [drawRank, setDrawRank] = useState<Rank | null>(null);
-  const [storageReady, setStorageReady] = useState(false);
+  const [cloudUser, setCloudUser] = useState<User | null>(null);
+  const [authReady, setAuthReady] = useState(false);
+  const [cloudReady, setCloudReady] = useState(false);
+  const [cloudError, setCloudError] = useState("");
 
   useEffect(() => {
-    try {
-      const storedPlayers = JSON.parse(localStorage.getItem("first-ten-players") || "[]");
-      const storedGames = JSON.parse(localStorage.getItem("first-ten-results") || "[]");
-      setPlayers(Array.isArray(storedPlayers) ? storedPlayers : []);
-      setGames(Array.isArray(storedGames) ? storedGames : []);
-    } catch { setPlayers([]); setGames([]); }
-    setStorageReady(true);
+    let stopCloud: () => void = () => undefined;
+    const stopAuth = watchAuth((user) => {
+      stopCloud(); setCloudUser(user); setAuthReady(true); setCloudError("");
+      if (!user) { setCloudReady(false); return; }
+      setCloudReady(false);
+      stopCloud = watchCloudState(user.uid, (data) => {
+        if (data) {
+          setPlayers(data.players); setGames(data.gameResults);
+          try { localStorage.setItem("first-ten-players", JSON.stringify(data.players)); localStorage.setItem("first-ten-results", JSON.stringify(data.gameResults)); } catch { /* cache is optional */ }
+          setCloudReady(true);
+        } else {
+          const cachedPlayers = readCache<PlayerProfile>("first-ten-players");
+          const cachedGames = readCache<GameResult>("first-ten-results");
+          void saveCloudState(user.uid, { players: cachedPlayers, gameResults: cachedGames }).then(() => setCloudReady(true)).catch((error: Error) => setCloudError(error.message));
+        }
+      }, (error) => { setCloudError(error.message); setCloudReady(true); });
+    });
+    return () => { stopCloud(); stopAuth(); };
   }, []);
 
-  const persist = (key: string, value: unknown) => { try { localStorage.setItem(key, JSON.stringify(value)); } catch { /* degraded session-only mode */ } };
+  const persistCollections = (nextPlayers: PlayerProfile[], nextGames: GameResult[]) => {
+    try { localStorage.setItem("first-ten-players", JSON.stringify(nextPlayers)); localStorage.setItem("first-ten-results", JSON.stringify(nextGames)); } catch { /* cache is optional */ }
+    if (cloudUser) void saveCloudState(cloudUser.uid, { players: nextPlayers, gameResults: nextGames }).catch((error: Error) => setCloudError(error.message));
+  };
   const nameOf = (t: Team, s = session) => s[t] || (t === "p1" ? "Player 1" : "Player 2");
   const accent = (t: Team) => t === "p1" ? "var(--p1)" : "var(--p2)";
   const push = (current = session) => setUndoStack((u) => [...u.slice(-39), structuredClone(current)]);
@@ -171,7 +191,7 @@ export default function FirstAndTen() {
   const createPlayer = (team: Team, event: FormEvent) => {
     event.preventDefault(); const name = newNames[team].trim(); if (!name) return;
     const profile = { id: uid(), name, createdAt: Date.now() }; const updated = [...players, profile];
-    setPlayers(updated); persist("first-ten-players", updated); setSelected((v) => ({ ...v, [team]: profile.id })); setNewNames((v) => ({ ...v, [team]: "" }));
+    setPlayers(updated); persistCollections(updated, games); setSelected((v) => ({ ...v, [team]: profile.id })); setNewNames((v) => ({ ...v, [team]: "" }));
   };
   const resetSetup = (phase: Phase = "names") => { setSession(initial(phase)); setUndoStack([]); setSelected({ p1: "", p2: "" }); clearInputs(); };
   const navigate = (phase: Phase) => { if (phase === "names") resetSetup("names"); else { setSession((s) => ({ ...s, phase })); if (phase === "home" || phase === "history") setSelected({ p1: "", p2: "" }); } };
@@ -197,7 +217,7 @@ export default function FirstAndTen() {
     if (save) {
       const winner: Team = session.scores.p1 > session.scores.p2 ? "p1" : "p2";
       const result: GameResult = { id: uid(), playedAt: Date.now(), p1PlayerId: session.p1PlayerId, p2PlayerId: session.p2PlayerId, p1Name: session.p1, p2Name: session.p2, p1Score: session.scores.p1, p2Score: session.scores.p2, winnerPlayerId: session[`${winner}PlayerId`], overtime: session.overtime, finalPossessionNum: session.possessionNum };
-      const updated = [...games, result]; setGames(updated); persist("first-ten-results", updated);
+      const updated = [...games, result]; setGames(updated); persistCollections(players, updated);
     }
     setSession((s) => ({ ...s, resultSaved: save })); setUndoStack([]);
   };
@@ -208,9 +228,13 @@ export default function FirstAndTen() {
   const advanceLabel = !session.overtime && session.possessionNum >= 8 ? (session.scores.p1 === session.scores.p2 ? "Go to overtime" : "See final") : session.overtime && session.possessionNum % 2 === 0 && session.scores.p1 !== session.scores.p2 ? "See final" : !session.overtime && session.possessionNum === 4 ? "Start 2nd half" : "Start next drive";
   const winnerTeam: Team = session.scores.p1 > session.scores.p2 ? "p1" : "p2";
 
-  if (!storageReady) return <main className="app"><Header /><section className="card"><p>Loading your field…</p></section></main>;
+  if (!cloudConfigured) return <main className="app"><Header /><section className="card cloud-gate"><Eyebrow>Cloud setup</Eyebrow><h2>Cloud sync is being connected</h2><p className="helper">The site build is ready. Its Firebase project details still need to be added before deployment.</p></section></main>;
+  if (!authReady || (cloudUser && !cloudReady)) return <main className="app"><Header /><section className="card cloud-gate"><p>Loading your shared field…</p></section></main>;
+  if (!cloudUser) return <main className="app"><Header /><section className="card cloud-gate"><Eyebrow>Shared records</Eyebrow><h2>Sign in to play</h2><p className="helper">Use the same Google account on every device to keep one shared player list and game history.</p><button className="primary" onClick={() => void signInToCloud().catch((error: Error) => setCloudError(error.message))}>Continue with Google</button>{cloudError && <p className="cloud-error" role="alert">{cloudError}</p>}</section></main>;
   return <main className="app">
     <Header />
+    {!gameActive && <div className="account-bar"><span>● Cloud synced · {cloudUser.email || "Google account"}</span><button onClick={() => void signOutOfCloud()}>Sign out</button></div>}
+    {cloudError && !gameActive && <p className="cloud-error" role="alert">Sync issue: {cloudError}</p>}
     {!gameActive && <nav className="tabs" aria-label="Primary">
       <button className={session.phase === "home" || session.phase === "names" || session.phase === "possession" ? "active" : ""} onClick={() => navigate(session.phase === "home" ? "names" : "home")}>{session.phase === "home" ? "New Game" : "Play"}</button>
       <button className={session.phase === "history" ? "active" : ""} onClick={() => navigate("history")}>History</button>

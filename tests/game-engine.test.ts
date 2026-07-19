@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { fieldGoalGood, fgMinRank, fieldPercent, interceptionStart, playerStats, puntDistance, resolveMatch, valueOf } from "../app/game-engine.ts";
+import { extraPointGood, fieldGoalGood, fgMinRank, fieldPercent, interceptionStart, playerStats, puntDistance, resolveMatch, valueOf } from "../app/game-engine.ts";
 
 test("resolution chart and card values", () => {
   assert.equal(resolveMatch({color:"black",rank:"5"},{color:"black",rank:"8"}).gain, 0);
@@ -25,6 +25,13 @@ test("distance-scaled field goals", () => {
   const cases = [[85,"3",false],[85,"4",true],[75,"4",false],[75,"5",true],[65,"6",false],[65,"7",true],[55,"8",false],[55,"9",true],[45,"10",false],[45,"J",true],[49,"10",false],[49,"J",true],[50,"8",false],[50,"9",true]] as const;
   for (const [spot,rank,good] of cases) assert.equal(fieldGoalGood(spot,rank),good);
   assert.equal(fgMinRank(39), null);
+});
+
+test("extra points use rank 4 as the minimum without changing field goals", () => {
+  assert.equal(extraPointGood("2"), false);
+  assert.equal(extraPointGood("3"), false);
+  for (const rank of ["4","5","6","7","8","9","10","J","Q","K","A"] as const) assert.equal(extraPointGood(rank), true);
+  assert.equal(fieldGoalGood(75, "4"), false);
 });
 
 test("punt values and player records", () => {

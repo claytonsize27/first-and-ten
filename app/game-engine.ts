@@ -51,6 +51,10 @@ export function fieldGoalGood(ballPos: number, rank: Rank) {
   return minimum !== null && RANKS.indexOf(rank) >= RANKS.indexOf(minimum);
 }
 
+export function extraPointGood(rank: Rank) {
+  return RANKS.indexOf(rank) >= RANKS.indexOf("4");
+}
+
 export function puntDistance(rank: Rank) {
   return rank === "A" ? 70 : valueOf(rank) * 5;
 }

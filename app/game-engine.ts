@@ -72,6 +72,11 @@ export function displaySpot(ballPos: number) {
   return `${ballPos < 50 ? "own" : "opp"} ${Math.min(ballPos, 100 - ballPos)}`;
 }
 
+// The playable field occupies the middle 90%; each end zone gets 5%.
+export function fieldPercent(position: number) {
+  return 5 + Math.max(0, Math.min(100, position)) * 0.9;
+}
+
 export type PlayerProfile = { id: string; name: string; createdAt: number };
 export type GameResult = {
   id: string; playedAt: number; p1PlayerId: string; p2PlayerId: string;

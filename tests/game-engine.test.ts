@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { emptyPlayerGameStats, extraPointGood, fieldGoalGood, fgMinRank, fieldPercent, gamePlayerStats, gameSortMetric, interceptionStart, playerStats, puntDistance, resolveMatch, valueOf } from "../app/game-engine.ts";
+import { emptyPlayerGameStats, extraPointGood, fieldGoalGood, fgMinRank, fieldPercent, gamePlayerStats, gameSortMetric, interceptionStart, playerStats, puntDistance, resolveMatch, sortGameResults, valueOf } from "../app/game-engine.ts";
 
 test("resolution chart and card values", () => {
   assert.equal(resolveMatch({color:"black",rank:"5"},{color:"black",rank:"8"}).gain, 0);
@@ -61,4 +61,10 @@ test("saved game detail metrics and legacy compatibility", () => {
   assert.equal(gameSortMetric(detailed,"fgMisses"),1);
   assert.equal(gameSortMetric(detailed,"twoPointAttempts"),1);
   assert.equal(gameSortMetric(detailed,"onsideRecoveries"),1);
+});
+
+test("history defaults to most recently played first", () => {
+  const base = {p1PlayerId:"a",p2PlayerId:"b",p1Name:"A",p2Name:"B",p1Score:7,p2Score:3,winnerPlayerId:"a",overtime:false,finalPossessionNum:8};
+  const games = [{...base,id:"middle",playedAt:200},{...base,id:"oldest",playedAt:100},{...base,id:"newest",playedAt:300}];
+  assert.deepEqual(sortGameResults(games).map((game) => game.id), ["newest","middle","oldest"]);
 });

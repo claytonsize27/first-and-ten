@@ -121,6 +121,15 @@ export function gameSortMetric(game: GameResult, metric: string) {
   return game.playedAt;
 }
 
+export function sortGameResults(games: GameResult[], sort = "newest:desc") {
+  const [metric, direction] = sort.split(":");
+  return [...games].sort((a, b) => {
+    const av = metric === "newest" ? a.playedAt : gameSortMetric(a, metric);
+    const bv = metric === "newest" ? b.playedAt : gameSortMetric(b, metric);
+    return (direction === "asc" ? av - bv : bv - av) || (b.playedAt - a.playedAt);
+  });
+}
+
 export function playerStats(playerId: string, games: GameResult[]) {
   const played = games.filter((g) => g.p1PlayerId === playerId || g.p2PlayerId === playerId);
   const wins = played.filter((g) => g.winnerPlayerId === playerId).length;

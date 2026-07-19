@@ -4,7 +4,7 @@ import { FormEvent, useEffect, useMemo, useState } from "react";
 import {
   Card, CardColor, GameResult, MatchResult, PlayerGameStats, PlayerProfile, RANKS, Rank,
   cardStr, displaySpot, extraPointGood, fgMinRank, fieldGoalGood, fieldPercent, interceptionStart, ordinal,
-  emptyPlayerGameStats, gamePlayerStats, gameSortMetric, playerStats, puntDistance, resolveMatch, valueOf, yd,
+  emptyPlayerGameStats, gamePlayerStats, playerStats, puntDistance, resolveMatch, sortGameResults, valueOf, yd,
 } from "./game-engine";
 import type { User } from "firebase/auth";
 import { cloudConfigured, saveCloudState, signInToCloud, signOutOfCloud, watchAuth, watchCloudState } from "./cloud-store";
@@ -308,7 +308,7 @@ function RulesContent(){return <div className="rules-content"><ol className="rul
 function RulesPage(){return <section className="card rules-page"><Eyebrow>Quick guide</Eyebrow><h2>How to play</h2><p className="helper">Everything needed to start playing, in order.</p><RulesContent /></section>}
 function RulesOverlay({onClose}:{onClose:()=>void}){return <div className="rules-overlay" role="dialog" aria-modal="true" aria-labelledby="rules-title"><section className="rules-modal"><button className="rules-close" aria-label="Close rules" onClick={onClose}>×</button><Eyebrow>Quick guide</Eyebrow><h2 id="rules-title">How to play</h2><RulesContent /></section></div>}
 const HISTORY_SORTS=[
-  ["newest:desc","Newest games"],["totalScore:asc","Lowest total score"],["totalScore:desc","Highest total score"],
+  ["newest:desc","Most recently played"],["totalScore:asc","Lowest total score"],["totalScore:desc","Highest total score"],
   ["playerScore:asc","Lowest score by one player"],["playerScore:desc","Highest score by one player"],
   ["turnovers:asc","Lowest turnovers"],["turnovers:desc","Highest turnovers"],
   ["yards:asc","Lowest yards gained"],["yards:desc","Highest yards gained"],
@@ -324,6 +324,6 @@ function gameDate(playedAt:number){const d=new Date(playedAt);const date=`${d.ge
 function History({players,games,onNew}:{players:PlayerProfile[];games:GameResult[];onNew:()=>void}){
   const records=useMemo(()=>players.map(p=>({...p,...playerStats(p.id,games)})).sort((a,b)=>b.wins-a.wins||a.name.localeCompare(b.name)),[players,games]);
   const [sort,setSort]=useState("newest:desc"),[expanded,setExpanded]=useState<string|null>(null);
-  const recent=useMemo(()=>{const [metric,direction]=sort.split(":");return [...games].sort((a,b)=>{const av=metric==="newest"?a.playedAt:gameSortMetric(a,metric),bv=metric==="newest"?b.playedAt:gameSortMetric(b,metric);return (direction==="asc"?av-bv:bv-av)||(b.playedAt-a.playedAt)})},[games,sort]);
+  const recent=useMemo(()=>sortGameResults(games,sort),[games,sort]);
   if(!games.length)return <section className="card empty-history"><Eyebrow>Game History</Eyebrow><h2>Past games &amp; records</h2><p>No games recorded yet. Play a game and choose to save the result to start building history.</p><button className="primary" onClick={onNew}>New Game</button></section>;
   return <section className="card history"><Eyebrow>Game History</Eyebrow><h2>Past games &amp; records</h2><h3>Player records</h3><div className="table-wrap"><table><thead><tr><th>Player</th><th>GP</th><th>W</th><th>L</th><th>Win%</th></tr></thead><tbody>{records.map(p=><tr key={p.id}><th>{p.name}</th><td data-label="Games">{p.gamesPlayed}</td><td data-label="Wins">{p.wins}</td><td data-label="Losses">{p.losses}</td><td data-label="Win%">{p.winPct===null?"—":`${p.winPct}%`}</td></tr>)}</tbody></table></div><div className="history-list-head"><h3>Games</h3><label>Sort games<select value={sort} onChange={e=>setSort(e.target.value)}>{HISTORY_SORTS.map(([value,label])=><option value={value} key={value}>{label}</option>)}</select></label></div><div className="recent-games">{recent.map(g=>{const open=expanded===g.id;return <article key={g.id} className={open?"expanded":""}><button className="game-summary" aria-expanded={open} onClick={()=>setExpanded(open?null:g.id)}><time>{gameDate(g.playedAt)}{g.overtime&&" (OT)"}</time><span><strong>{g.p1Name}</strong> - {g.p1Score} <strong>{g.p2Name}</strong> - {g.p2Score}</span><i aria-hidden="true">{open?"−":"+"}</i></button>{open&&(g.stats?<StatsSnapshot title="Game stats" p1Name={g.p1Name} p2Name={g.p2Name} stats={{p1:gamePlayerStats(g,"p1"),p2:gamePlayerStats(g,"p2")}}/>:<p className="legacy-stats">Detailed stats were not recorded for this earlier game.</p>)}</article>})}</div></section>}

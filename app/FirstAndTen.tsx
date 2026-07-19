@@ -2,9 +2,9 @@
 
 import { FormEvent, useEffect, useMemo, useState } from "react";
 import {
-  Card, CardColor, GameResult, MatchResult, PlayerProfile, RANKS, Rank,
+  Card, CardColor, GameResult, MatchResult, PlayerGameStats, PlayerProfile, RANKS, Rank,
   cardStr, displaySpot, extraPointGood, fgMinRank, fieldGoalGood, fieldPercent, interceptionStart, ordinal,
-  playerStats, puntDistance, resolveMatch, valueOf, yd,
+  emptyPlayerGameStats, gamePlayerStats, gameSortMetric, playerStats, puntDistance, resolveMatch, valueOf, yd,
 } from "./game-engine";
 import type { User } from "firebase/auth";
 import { cloudConfigured, saveCloudState, signInToCloud, signOutOfCloud, watchAuth, watchCloudState } from "./cloud-store";
@@ -19,6 +19,7 @@ type Session = {
   otStarter: Team; twoPoint: boolean; pendingOff: Card | null; pendingDef: Card | null;
   subMode: SubMode; scoringTeam: Team | null; pendingNext: { offense: Team; ballPos: number } | null;
   postScoreBanner: string; driveOver: boolean; driveOverMsg: string; log: string[];
+  stats: Record<Team, PlayerGameStats>;
   resultSaved: null | boolean;
 };
 
@@ -27,7 +28,8 @@ const initial = (phase: Phase = "home"): Session => ({
   offense: "p1", possessionNum: 1, ballPos: 20, down: 1, lineToGain: 30,
   scores: { p1: 0, p2: 0 }, overtime: false, otStarter: "p1", twoPoint: false,
   pendingOff: null, pendingDef: null, subMode: null, scoringTeam: null,
-  pendingNext: null, postScoreBanner: "", driveOver: false, driveOverMsg: "", log: [], resultSaved: null,
+  pendingNext: null, postScoreBanner: "", driveOver: false, driveOverMsg: "", log: [],
+  stats: { p1: emptyPlayerGameStats(), p2: emptyPlayerGameStats() }, resultSaved: null,
 });
 const other = (team: Team): Team => team === "p1" ? "p2" : "p1";
 const uid = () => globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`;
@@ -86,6 +88,7 @@ export default function FirstAndTen() {
   };
   const clearInputs = () => { setOffCard({}); setDefCard({}); setDrawColor(null); setDrawRank(null); };
   const addLog = (s: Session, line: string) => { s.log = [line, ...s.log].slice(0, 60); };
+  const addPoints = (s: Session, team: Team, points: number) => { s.scores[team] += points; s.stats[team].points += points; };
   const endDrive = (s: Session, msg: string, next: { offense: Team; ballPos: number }) => {
     s.driveOver = true; s.driveOverMsg = msg; s.pendingNext = next; s.subMode = null;
   };
@@ -118,12 +121,14 @@ export default function FirstAndTen() {
         : playNarrative(s, result, o, d);
     if (s.twoPoint) {
       const good = tieKind === "recover" || (result.kind !== "interception" && result.gain !== undefined && result.gain >= 2);
-      if (good) s.scores[offense] += 2;
+      if (good) { addPoints(s, offense, 2); s.stats[offense].twoPointMade += 1; }
+      else s.stats[offense].twoPointMissed += 1;
       addLog(s, `${narrative} Two-point try is ${good ? "GOOD! (+2)" : "no good."}`);
       afterScore(s, offense, `Two-point try: ${good ? "GOOD (+2)." : "no good."}`);
       return;
     }
     if (tieKind === "fumble" || result.kind === "interception") {
+      s.stats[offense].turnovers += 1;
       addLog(s, narrative);
       const spot = result.kind === "interception" ? interceptionStart(los) : 100 - los;
       const msg = result.kind === "interception"
@@ -132,12 +137,13 @@ export default function FirstAndTen() {
       endDrive(s, msg, { offense: defense, ballPos: spot }); return;
     }
     const gain = tieKind === "recover" ? valueOf(o.rank) : result.gain ?? 0;
+    s.stats[offense][o.color === "black" ? "runYards" : "passYards"] += gain;
     const newPos = los + gain;
     if (newPos >= 100) {
-      s.scores[offense] += 6; addLog(s, `${narrative} TOUCHDOWN!`); s.scoringTeam = offense; s.phase = "pat"; s.subMode = null; return;
+      addPoints(s, offense, 6); addLog(s, `${narrative} TOUCHDOWN!`); s.scoringTeam = offense; s.phase = "pat"; s.subMode = null; return;
     }
     if (newPos < 0) {
-      s.scores[defense] += 2; addLog(s, `${narrative} — ${nameOf(defense, s)} gets a SAFETY! (+2)`);
+      addPoints(s, defense, 2); addLog(s, `${narrative} — ${nameOf(defense, s)} gets a SAFETY! (+2)`);
       endDrive(s, `SAFETY! ${nameOf(defense, s)} +2.`, { offense: defense, ballPos: 20 }); return;
     }
     if (newPos >= s.lineToGain) {
@@ -166,7 +172,9 @@ export default function FirstAndTen() {
       if (mode === "tie" && s.pendingOff && s.pendingDef) applyOutcome(s, { kind: "tie" }, s.pendingOff, s.pendingDef, drawColor === "red" ? "recover" : "fumble");
       if (mode === "fg" && drawRank) {
         const distance = 100 - s.ballPos;
-        if (fieldGoalGood(s.ballPos, drawRank)) { s.scores[offense] += 3; addLog(s, `${nameOf(offense, s)} drills the ${distance}-yard field goal! (+3)`); afterScore(s, offense, `Field goal (${distance} yds) is GOOD (+3)!`); }
+        const good = fieldGoalGood(s.ballPos, drawRank);
+        s.stats[offense].fieldGoals.push({ distance, made: good });
+        if (good) { addPoints(s, offense, 3); addLog(s, `${nameOf(offense, s)} drills the ${distance}-yard field goal! (+3)`); afterScore(s, offense, `Field goal (${distance} yds) is GOOD (+3)!`); }
         else { addLog(s, `${nameOf(offense, s)} misses the ${distance}-yard field goal attempt — ${nameOf(defense, s)} takes over.`); endDrive(s, `Field goal (${distance} yds) is NO GOOD — ${nameOf(defense, s)} takes over.`, { offense: defense, ballPos: 100 - s.ballPos }); }
       }
       if (mode === "punt" && drawRank) {
@@ -175,12 +183,13 @@ export default function FirstAndTen() {
         endDrive(s, touchback ? `Punt ${distance} yds — touchback. ${nameOf(defense, s)} at its 20.` : `Punt ${distance} yds — ${nameOf(defense, s)} takes over.`, { offense: defense, ballPos: spot });
       }
       if (mode === "xp" && drawRank && s.scoringTeam) {
-        const good = extraPointGood(drawRank); if (good) s.scores[s.scoringTeam] += 1;
+        const good = extraPointGood(drawRank); if (good) addPoints(s, s.scoringTeam, 1);
         addLog(s, `${nameOf(s.scoringTeam, s)} extra point is ${good ? "good. (+1)" : "no good."}`);
         afterScore(s, s.scoringTeam, `${nameOf(s.scoringTeam, s)} TD — extra point ${good ? "GOOD (+1)." : "missed."}`);
       }
       if (mode === "onside" && drawRank && s.scoringTeam) {
         const recovered = drawRank === "K" || drawRank === "A", next = recovered ? s.scoringTeam : other(s.scoringTeam);
+        if (recovered) s.stats[s.scoringTeam].onsideRecoveries += 1;
         addLog(s, recovered ? `${nameOf(s.scoringTeam, s)} recovers the onside kick! Ball at the 50.` : `${nameOf(s.scoringTeam, s)} onside kick fails — ${nameOf(next, s)} takes over at the 50.`);
         endDrive(s, recovered ? `Onside RECOVERED! ${nameOf(s.scoringTeam, s)} keeps it at the 50.` : `Onside failed — ${nameOf(next, s)} ball at the 50.`, { offense: next, ballPos: 50 });
       }
@@ -229,7 +238,7 @@ export default function FirstAndTen() {
     if (session.resultSaved !== null) return;
     if (save) {
       const winner: Team = session.scores.p1 > session.scores.p2 ? "p1" : "p2";
-      const result: GameResult = { id: uid(), playedAt: Date.now(), p1PlayerId: session.p1PlayerId, p2PlayerId: session.p2PlayerId, p1Name: session.p1, p2Name: session.p2, p1Score: session.scores.p1, p2Score: session.scores.p2, winnerPlayerId: session[`${winner}PlayerId`], overtime: session.overtime, finalPossessionNum: session.possessionNum };
+      const result: GameResult = { id: uid(), playedAt: Date.now(), p1PlayerId: session.p1PlayerId, p2PlayerId: session.p2PlayerId, p1Name: session.p1, p2Name: session.p2, p1Score: session.scores.p1, p2Score: session.scores.p2, winnerPlayerId: session[`${winner}PlayerId`], overtime: session.overtime, finalPossessionNum: session.possessionNum, stats: structuredClone(session.stats) };
       const updated = [...games, result]; setGames(updated); persistCollections(players, updated);
     }
     setSession((s) => ({ ...s, resultSaved: save })); setUndoStack([]);
@@ -261,7 +270,7 @@ export default function FirstAndTen() {
     {(["play", "pat", "onsideChoice"] as Phase[]).includes(session.phase) && <>
       <Scoreboard s={session} quarter={quarter} />
       <Field s={session} />
-      {session.driveOver ? <section className="card possession-over"><Eyebrow>Possession over</Eyebrow><h2>{session.driveOverMsg}</h2><button className="primary full" onClick={startNextDrive}>{advanceLabel}</button>{undoStack.length > 0 && <button className="undo-link" onClick={undo}>↶ Undo last play</button>}</section>
+      {session.driveOver ? <section className="card possession-over"><Eyebrow>Possession over</Eyebrow><h2>{session.driveOverMsg}</h2>{!session.overtime&&session.possessionNum===4&&<StatsSnapshot title="Halftime stats" p1Name={session.p1} p2Name={session.p2} stats={session.stats}/>}<button className="primary full" onClick={startNextDrive}>{advanceLabel}</button>{undoStack.length > 0 && <button className="undo-link" onClick={undo}>↶ Undo last play</button>}</section>
       : session.subMode ? <SubPanel mode={session.subMode} s={session} drawColor={drawColor} drawRank={drawRank} setDrawColor={setDrawColor} setDrawRank={setDrawRank} resolve={resolveSub} undo={undo} canUndo={undoStack.length > 0} />
       : session.phase === "pat" ? <section className="card"><Eyebrow>Point after</Eyebrow><h2>Touchdown, {session.scoringTeam && nameOf(session.scoringTeam)}! What&apos;s the call?</h2><div className="choices"><button onClick={() => act((s) => ({ ...s, subMode: "xp" }))}><strong>Kick extra point</strong><small>Draw a rank · 4 or higher is good (+1)</small></button><button onClick={() => act((s) => ({ ...s, twoPoint: true, ballPos: 98, down: 1, lineToGain: 100, phase: "play" }))}><strong>Go for two</strong><small>Play one down from the 2 (+2)</small></button></div><button className="secondary" onClick={undo}>↶ Undo</button></section>
       : session.phase === "onsideChoice" ? <section className="card"><div className="amber-banner">{session.postScoreBanner}</div><Eyebrow>Kickoff</Eyebrow><h2>Onside kick?</h2><p className="helper">Try to steal the next possession, or kick deep and hand the opponent the ball at its 20.</p><div className="choices"><button onClick={() => act((s) => ({ ...s, subMode: "onside" }))}><strong>Attempt onside</strong><small>Draw · King or Ace recovers at the 50</small></button><button onClick={() => act((s) => { const scorer=s.scoringTeam!; const recv=other(scorer); addLog(s, `${nameOf(scorer,s)} kicks off deep. ${nameOf(recv,s)} receives at its 20.`); endDrive(s, `${nameOf(scorer,s)} kicks off — ${nameOf(recv,s)} receives.`, {offense:recv,ballPos:20}); return s; })}><strong>Kick it deep</strong><small>Normal kickoff · opponent at its 20</small></button></div><button className="secondary" onClick={undo}>↶ Undo</button></section>
@@ -269,7 +278,7 @@ export default function FirstAndTen() {
       <PlayLog lines={session.log}/>
     </>}
     {session.phase === "suddenDeathStart" && <section className="card"><Eyebrow>Overtime</Eyebrow><h2>Tied after 4 quarters!</h2><p className="helper">Each team gets one possession from its own 20. Higher score after the round wins; if tied, play another round. Cut the deck to pick who starts.</p><div className="team-picks">{(["p1","p2"] as Team[]).map((t)=><button className="team-pick" style={{"--accent":accent(t)} as React.CSSProperties} key={t} onClick={()=>startOvertime(t)}><span className="dot"/><strong>{nameOf(t)}</strong><small>STARTS OT</small></button>)}</div></section>}
-    {session.phase === "gameOver" && <section className="card final"><Eyebrow>Final</Eyebrow><h2 style={{color:accent(winnerTeam)}}>{nameOf(winnerTeam)} wins!</h2><div className="final-score"><span>{session.p1}</span><strong>{session.scores.p1} – {session.scores.p2}</strong><span>{session.p2}</span></div>{guestMode ? <div className="save-panel"><p className="helper">Guest game complete. Profiles and results were not saved.</p><button className="primary" onClick={()=>resetSetup("names")}>New game</button></div> : session.resultSaved === null ? <div className="save-panel"><p>Save this result to {nameOf(winnerTeam)}&apos;s and {nameOf(other(winnerTeam))}&apos;s records?</p><div className="action-row"><button className="primary" onClick={()=>saveDecision(true)}>Save result</button><button className="secondary" onClick={()=>saveDecision(false)}>Don&apos;t save</button></div></div> : <div className="save-panel"><p className={session.resultSaved ? "saved" : "helper"}>{session.resultSaved ? "✓ Saved to game history." : "Result not saved."}</p><div className="action-row"><button className="primary" onClick={()=>resetSetup("names")}>New game</button><button className="secondary" onClick={()=>navigate("history")}>View history</button></div></div>}</section>}
+    {session.phase === "gameOver" && <section className="card final"><Eyebrow>Final</Eyebrow><h2 style={{color:accent(winnerTeam)}}>{nameOf(winnerTeam)} wins!</h2><div className="final-score"><span>{session.p1}</span><strong>{session.scores.p1} – {session.scores.p2}</strong><span>{session.p2}</span></div><StatsSnapshot title="Final stats" p1Name={session.p1} p2Name={session.p2} stats={session.stats}/>{guestMode ? <div className="save-panel"><p className="helper">Guest game complete. Profiles and results were not saved.</p><button className="primary" onClick={()=>resetSetup("names")}>New game</button></div> : session.resultSaved === null ? <div className="save-panel"><p>Save this result to {nameOf(winnerTeam)}&apos;s and {nameOf(other(winnerTeam))}&apos;s records?</p><div className="action-row"><button className="primary" onClick={()=>saveDecision(true)}>Save result</button><button className="secondary" onClick={()=>saveDecision(false)}>Don&apos;t save</button></div></div> : <div className="save-panel"><p className={session.resultSaved ? "saved" : "helper"}>{session.resultSaved ? "✓ Saved to game history." : "Result not saved."}</p><div className="action-row"><button className="primary" onClick={()=>resetSetup("names")}>New game</button><button className="secondary" onClick={()=>navigate("history")}>View history</button></div></div>}</section>}
     {session.phase === "rules" && <RulesPage />}
     {cloudUser && session.phase === "history" && <History players={players} games={games} onNew={()=>resetSetup("names")} />}
     {showRules && <RulesOverlay onClose={()=>setShowRules(false)} />}
@@ -280,6 +289,7 @@ function Header({onRules}:{onRules?:()=>void}){return <header><h1>FIRST <span>&a
 function Eyebrow({children}:{children:React.ReactNode}){return <p className="eyebrow">{children}</p>}
 function Home({games,cloudEnabled,onNew,onHistory}:{games:number;cloudEnabled:boolean;onNew:()=>void;onHistory:()=>void}){return <section className="card hero"><Eyebrow>Welcome</Eyebrow><h2>First &amp; Ten</h2><p className="helper">Track drives, downs, and scores for your card-football games.</p><div className="home-actions"><button className="primary" onClick={onNew}>New Game</button>{cloudEnabled&&<button className="alt" onClick={onHistory}>Game History</button>}</div>{cloudEnabled&&games>0&&<p className="recorded">{games} {games===1?"game":"games"} recorded</p>}</section>}
 function Scoreboard({s,quarter}:{s:Session;quarter:string}){return <section className="scoreboard">{(["p1","p2"] as Team[]).map((t,i)=><div key={t} className={`score-cell score-${t}`} style={{order:i===0?0:2}}><p>{s[t]}</p><strong>{s.scores[t]}</strong><small className={s.offense===t?"on-offense":""}>{s.offense===t?"▶ OFFENSE":"DEFENSE"}</small></div>)}<div className="score-meta"><strong>{quarter}</strong><small>{s.overtime?"SUDDEN DEATH":`POSS ${s.possessionNum}/8`}</small></div></section>}
+function StatsSnapshot({title,p1Name,p2Name,stats}:{title:string;p1Name:string;p2Name:string;stats:Record<Team,PlayerGameStats>}){const fg=(s:PlayerGameStats)=>{const made=s.fieldGoals.filter(x=>x.made).length,missed=s.fieldGoals.length-made;return `${made} made · ${missed} missed${s.fieldGoals.length?` · ${s.fieldGoals.map(x=>`${x.made?"✓":"✕"}${x.distance} yd`).join(", ")}`:""}`};const two=(s:PlayerGameStats)=>`${s.twoPointMade} made · ${s.twoPointMissed} failed`;const rows:[string,(s:PlayerGameStats)=>React.ReactNode][]=[["Total yards",s=>s.runYards+s.passYards],["Pass yards",s=>s.passYards],["Run yards",s=>s.runYards],["Turnovers",s=>s.turnovers],["Field goals",fg],["2-point conversions",two],["Onside recoveries",s=>s.onsideRecoveries],["Points",s=>s.points]];return <section className="stats-snapshot"><h3>{title}</h3><div className="stats-grid"><div className="stats-head"><span>Stat</span><strong>{p1Name}</strong><strong>{p2Name}</strong></div>{rows.map(([label,format])=><div className="stats-row" key={label}><span>{label}</span><b>{format(stats.p1)}</b><b>{format(stats.p2)}</b></div>)}</div><p className="stats-key">✓ and ✕ identify each field-goal result and attempt distance.</p></section>}
 function Field({s}:{s:Session}){return <section className="field-wrap"><div className="field" aria-label={`Ball on ${displaySpot(s.ballPos)}`}><div className="end-zone end-zone-own">OWN</div><div className="end-zone end-zone-opponent">END ZONE</div>{[10,20,30,40,50,60,70,80,90].map((n)=><div className="yard" style={{left:`${fieldPercent(n)}%`}} key={n}><span>{Math.min(n,100-n)}</span></div>)}<div className="first-line" style={{left:`${fieldPercent(s.lineToGain)}%`}}/><div className={`football ball-${s.offense}`} style={{left:`${fieldPercent(s.ballPos)}%`}}><i/></div></div><div className="field-caption"><span>◀ own goal</span><span>Ball on the <b>{displaySpot(s.ballPos)}</b> · {100-s.ballPos} to the end zone</span><span>end zone ▶</span></div></section>}
 function CardEntry({role,name,color,card,setCard}:{role:string;name:string;color:string;card:Partial<Card>;setCard:React.Dispatch<React.SetStateAction<Partial<Card>>>}){return <div className={`entry ${card.color&&card.rank?"complete":""}`} style={{"--accent":color} as React.CSSProperties}><div className="entry-head"><strong>● {role}</strong><span>{name}</span></div><div className="color-grid"><button className={card.color==="black"?"selected":""} onClick={()=>setCard(c=>({...c,color:"black"}))}>RUN ♠</button><button className={`pass ${card.color==="red"?"selected":""}`} onClick={()=>setCard(c=>({...c,color:"red"}))}>PASS ♥</button></div><div className="rank-grid">{RANKS.map(r=><button aria-label={`${role} rank ${r}`} className={card.rank===r?"selected":""} key={r} onClick={()=>setCard(c=>({...c,rank:r}))}>{r}</button>)}</div></div>}
 function SubPanel({mode,s,drawColor,drawRank,setDrawColor,setDrawRank,resolve,undo,canUndo}:{mode:Exclude<SubMode,null>;s:Session;drawColor:CardColor|null;drawRank:Rank|null;setDrawColor:(c:CardColor)=>void;setDrawRank:(r:Rank)=>void;resolve:()=>void;undo:()=>void;canUndo:boolean}){const colorMode=mode==="tie";const titles={tie:"Broken play — same rank!",fg:"Field goal attempt",punt:"Punt",xp:"Extra point",onside:"Onside kick"};const confirms={tie:"Resolve recovery",fg:"Kick it",punt:"Punt it",xp:"Kick it",onside:"Kick it"};const min=fgMinRank(s.ballPos);const hints={tie:"Red → offense recovers · Black → the defense recovers at this spot",fg:`${min} or higher is good from ${100-s.ballPos} yards · anything lower misses`,punt:"Distance = rank × 5 yards (Ace = 70) · into the end zone = touchback to the 20",xp:"4 or higher is good (+1) · 2 or 3 misses",onside:"King or Ace = recovered at the 50 · anything else, the opponent gets the 50"};return <section className="card"><Eyebrow>Draw a card</Eyebrow><h2>{titles[mode]}</h2><p className="helper">Draw the top card and enter its {colorMode?"color":"rank"}.</p>{colorMode?<div className="color-grid draw"><button className={drawColor==="black"?"selected":""} onClick={()=>setDrawColor("black")}>BLACK ♠</button><button className={`pass ${drawColor==="red"?"selected":""}`} onClick={()=>setDrawColor("red")}>RED ♥</button></div>:<div className="rank-grid draw">{RANKS.map(r=><button className={drawRank===r?"selected":""} key={r} onClick={()=>setDrawRank(r)}>{r}</button>)}</div>}<p className="key">{hints[mode]}</p><div className="action-row"><button className="primary" disabled={colorMode?!drawColor:!drawRank} onClick={resolve}>{confirms[mode]}</button><button className="secondary" disabled={!canUndo} onClick={undo}>↶ Undo</button></div></section>}
@@ -297,4 +307,23 @@ function RulesContent(){return <div className="rules-content"><ol className="rul
 </ol></div>}
 function RulesPage(){return <section className="card rules-page"><Eyebrow>Quick guide</Eyebrow><h2>How to play</h2><p className="helper">Everything needed to start playing, in order.</p><RulesContent /></section>}
 function RulesOverlay({onClose}:{onClose:()=>void}){return <div className="rules-overlay" role="dialog" aria-modal="true" aria-labelledby="rules-title"><section className="rules-modal"><button className="rules-close" aria-label="Close rules" onClick={onClose}>×</button><Eyebrow>Quick guide</Eyebrow><h2 id="rules-title">How to play</h2><RulesContent /></section></div>}
-function History({players,games,onNew}:{players:PlayerProfile[];games:GameResult[];onNew:()=>void}){const stats=useMemo(()=>players.map(p=>({...p,...playerStats(p.id,games)})).sort((a,b)=>b.wins-a.wins||a.name.localeCompare(b.name)),[players,games]);const recent=[...games].sort((a,b)=>b.playedAt-a.playedAt);if(!games.length)return <section className="card empty-history"><Eyebrow>Game History</Eyebrow><h2>Past games &amp; records</h2><p>No games recorded yet. Play a game and choose to save the result to start building history.</p><button className="primary" onClick={onNew}>New Game</button></section>;return <section className="card history"><Eyebrow>Game History</Eyebrow><h2>Past games &amp; records</h2><h3>Player records</h3><div className="table-wrap"><table><thead><tr><th>Player</th><th>GP</th><th>W</th><th>L</th><th>Win%</th></tr></thead><tbody>{stats.map(p=><tr key={p.id}><th>{p.name}</th><td data-label="Games">{p.gamesPlayed}</td><td data-label="Wins">{p.wins}</td><td data-label="Losses">{p.losses}</td><td data-label="Win%">{p.winPct===null?"—":`${p.winPct}%`}</td></tr>)}</tbody></table></div><h3>Recent games</h3><div className="recent-games">{recent.map(g=>{const p1win=g.winnerPlayerId===g.p1PlayerId;return <article key={g.id}><time>{new Intl.DateTimeFormat(undefined,{dateStyle:"medium"}).format(g.playedAt)}</time><p><strong className={p1win?"winner":""}>{g.p1Name}</strong> {g.p1Score} – {g.p2Score} <strong className={!p1win?"winner":""}>{g.p2Name}</strong></p>{g.overtime&&<span>OT</span>}</article>})}</div></section>}
+const HISTORY_SORTS=[
+  ["newest:desc","Newest games"],["totalScore:asc","Lowest total score"],["totalScore:desc","Highest total score"],
+  ["playerScore:asc","Lowest score by one player"],["playerScore:desc","Highest score by one player"],
+  ["turnovers:asc","Lowest turnovers"],["turnovers:desc","Highest turnovers"],
+  ["yards:asc","Lowest yards gained"],["yards:desc","Highest yards gained"],
+  ["passYards:asc","Lowest pass yards gained"],["passYards:desc","Highest pass yards gained"],
+  ["runYards:asc","Lowest run yards gained"],["runYards:desc","Highest run yards gained"],
+  ["fgAttempts:asc","Lowest field goal attempts"],["fgAttempts:desc","Highest field goal attempts"],
+  ["fgMakes:asc","Lowest field goal makes"],["fgMakes:desc","Highest field goal makes"],
+  ["fgMisses:asc","Lowest field goal misses"],["fgMisses:desc","Highest field goal misses"],
+  ["twoPointAttempts:asc","Lowest 2-point attempts"],["twoPointAttempts:desc","Highest 2-point attempts"],
+  ["onsideRecoveries:asc","Lowest successful onside recoveries"],["onsideRecoveries:desc","Highest successful onside recoveries"],
+] as const;
+function gameDate(playedAt:number){const d=new Date(playedAt);const date=`${d.getMonth()+1}/${d.getDate()}`;const time=new Intl.DateTimeFormat(undefined,{hour:"numeric",minute:"2-digit"}).format(d);return `${date} ${time}`}
+function History({players,games,onNew}:{players:PlayerProfile[];games:GameResult[];onNew:()=>void}){
+  const records=useMemo(()=>players.map(p=>({...p,...playerStats(p.id,games)})).sort((a,b)=>b.wins-a.wins||a.name.localeCompare(b.name)),[players,games]);
+  const [sort,setSort]=useState("newest:desc"),[expanded,setExpanded]=useState<string|null>(null);
+  const recent=useMemo(()=>{const [metric,direction]=sort.split(":");return [...games].sort((a,b)=>{const av=metric==="newest"?a.playedAt:gameSortMetric(a,metric),bv=metric==="newest"?b.playedAt:gameSortMetric(b,metric);return (direction==="asc"?av-bv:bv-av)||(b.playedAt-a.playedAt)})},[games,sort]);
+  if(!games.length)return <section className="card empty-history"><Eyebrow>Game History</Eyebrow><h2>Past games &amp; records</h2><p>No games recorded yet. Play a game and choose to save the result to start building history.</p><button className="primary" onClick={onNew}>New Game</button></section>;
+  return <section className="card history"><Eyebrow>Game History</Eyebrow><h2>Past games &amp; records</h2><h3>Player records</h3><div className="table-wrap"><table><thead><tr><th>Player</th><th>GP</th><th>W</th><th>L</th><th>Win%</th></tr></thead><tbody>{records.map(p=><tr key={p.id}><th>{p.name}</th><td data-label="Games">{p.gamesPlayed}</td><td data-label="Wins">{p.wins}</td><td data-label="Losses">{p.losses}</td><td data-label="Win%">{p.winPct===null?"—":`${p.winPct}%`}</td></tr>)}</tbody></table></div><div className="history-list-head"><h3>Games</h3><label>Sort games<select value={sort} onChange={e=>setSort(e.target.value)}>{HISTORY_SORTS.map(([value,label])=><option value={value} key={value}>{label}</option>)}</select></label></div><div className="recent-games">{recent.map(g=>{const open=expanded===g.id;return <article key={g.id} className={open?"expanded":""}><button className="game-summary" aria-expanded={open} onClick={()=>setExpanded(open?null:g.id)}><time>{gameDate(g.playedAt)}{g.overtime&&" (OT)"}</time><span><strong>{g.p1Name}</strong> - {g.p1Score} <strong>{g.p2Name}</strong> - {g.p2Score}</span><i aria-hidden="true">{open?"−":"+"}</i></button>{open&&(g.stats?<StatsSnapshot title="Game stats" p1Name={g.p1Name} p2Name={g.p2Name} stats={{p1:gamePlayerStats(g,"p1"),p2:gamePlayerStats(g,"p2")}}/>:<p className="legacy-stats">Detailed stats were not recorded for this earlier game.</p>)}</article>})}</div></section>}

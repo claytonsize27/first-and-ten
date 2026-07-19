@@ -82,11 +82,44 @@ export function fieldPercent(position: number) {
 }
 
 export type PlayerProfile = { id: string; name: string; createdAt: number };
+export type FieldGoalAttempt = { distance: number; made: boolean };
+export type PlayerGameStats = {
+  runYards: number; passYards: number; turnovers: number;
+  fieldGoals: FieldGoalAttempt[]; twoPointMade: number; twoPointMissed: number;
+  onsideRecoveries: number; points: number;
+};
+export const emptyPlayerGameStats = (points = 0): PlayerGameStats => ({
+  runYards: 0, passYards: 0, turnovers: 0, fieldGoals: [],
+  twoPointMade: 0, twoPointMissed: 0, onsideRecoveries: 0, points,
+});
 export type GameResult = {
   id: string; playedAt: number; p1PlayerId: string; p2PlayerId: string;
   p1Name: string; p2Name: string; p1Score: number; p2Score: number;
   winnerPlayerId: string; overtime: boolean; finalPossessionNum: number;
+  stats?: { p1: PlayerGameStats; p2: PlayerGameStats };
 };
+
+export function gamePlayerStats(game: GameResult, team: "p1" | "p2") {
+  const saved = game.stats?.[team];
+  return saved ? { ...emptyPlayerGameStats(game[`${team}Score`]), ...saved, fieldGoals: Array.isArray(saved.fieldGoals) ? saved.fieldGoals : [] } : emptyPlayerGameStats(game[`${team}Score`]);
+}
+
+export function gameSortMetric(game: GameResult, metric: string) {
+  const p1 = gamePlayerStats(game, "p1"), p2 = gamePlayerStats(game, "p2");
+  const both = [p1, p2];
+  if (metric === "totalScore") return game.p1Score + game.p2Score;
+  if (metric === "playerScore") return Math.max(game.p1Score, game.p2Score);
+  if (metric === "turnovers") return p1.turnovers + p2.turnovers;
+  if (metric === "yards") return p1.runYards + p1.passYards + p2.runYards + p2.passYards;
+  if (metric === "passYards") return p1.passYards + p2.passYards;
+  if (metric === "runYards") return p1.runYards + p2.runYards;
+  if (metric === "fgAttempts") return p1.fieldGoals.length + p2.fieldGoals.length;
+  if (metric === "fgMakes") return both.flatMap((s) => s.fieldGoals).filter((fg) => fg.made).length;
+  if (metric === "fgMisses") return both.flatMap((s) => s.fieldGoals).filter((fg) => !fg.made).length;
+  if (metric === "twoPointAttempts") return p1.twoPointMade + p1.twoPointMissed + p2.twoPointMade + p2.twoPointMissed;
+  if (metric === "onsideRecoveries") return p1.onsideRecoveries + p2.onsideRecoveries;
+  return game.playedAt;
+}
 
 export function playerStats(playerId: string, games: GameResult[]) {
   const played = games.filter((g) => g.p1PlayerId === playerId || g.p2PlayerId === playerId);

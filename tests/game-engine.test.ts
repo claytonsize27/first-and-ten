@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { extraPointGood, fieldGoalGood, fgMinRank, fieldPercent, interceptionStart, playerStats, puntDistance, resolveMatch, valueOf } from "../app/game-engine.ts";
+import { emptyPlayerGameStats, extraPointGood, fieldGoalGood, fgMinRank, fieldPercent, gamePlayerStats, gameSortMetric, interceptionStart, playerStats, puntDistance, resolveMatch, valueOf } from "../app/game-engine.ts";
 
 test("resolution chart and card values", () => {
   assert.equal(resolveMatch({color:"black",rank:"5"},{color:"black",rank:"8"}).gain, 0);
@@ -46,4 +46,19 @@ test("field coordinates reserve visible end zones", () => {
   assert.equal(fieldPercent(90), 86);
   assert.equal(fieldPercent(100), 95);
   assert.equal(fieldPercent(100) - fieldPercent(90), 9);
+});
+
+test("saved game detail metrics and legacy compatibility", () => {
+  const legacy = {id:"old",playedAt:1,p1PlayerId:"a",p2PlayerId:"b",p1Name:"A",p2Name:"B",p1Score:7,p2Score:3,winnerPlayerId:"a",overtime:false,finalPossessionNum:8};
+  assert.deepEqual(gamePlayerStats(legacy,"p1"),emptyPlayerGameStats(7));
+  const detailed = {...legacy,id:"new",stats:{
+    p1:{...emptyPlayerGameStats(14),runYards:40,passYards:60,turnovers:1,fieldGoals:[{distance:35,made:true},{distance:50,made:false}],twoPointMade:1,onsideRecoveries:1},
+    p2:{...emptyPlayerGameStats(6),runYards:20,passYards:10,turnovers:2,fieldGoals:[{distance:25,made:true}]},
+  }};
+  assert.equal(gameSortMetric(detailed,"yards"),130);
+  assert.equal(gameSortMetric(detailed,"fgAttempts"),3);
+  assert.equal(gameSortMetric(detailed,"fgMakes"),2);
+  assert.equal(gameSortMetric(detailed,"fgMisses"),1);
+  assert.equal(gameSortMetric(detailed,"twoPointAttempts"),1);
+  assert.equal(gameSortMetric(detailed,"onsideRecoveries"),1);
 });

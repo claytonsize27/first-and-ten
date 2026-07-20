@@ -3,7 +3,7 @@
 import { FormEvent, useEffect, useMemo, useState } from "react";
 import {
   Card, CardColor, GameResult, MatchResult, PlayerGameStats, PlayerProfile, RANKS, Rank, VirtualCard,
-  cardStr, displaySpot, extraPointGood, fgMinRank, fieldGoalGood, fieldPercent, interceptionStart, ordinal,
+  cardStr, displaySpot, extraPointGood, fgMinRank, fieldGoalGood, fieldPercent, fumbleStart, interceptionStart, ordinal,
   dealVirtualDeck, drawOneVirtual, emptyPlayerGameStats, gamePlayerStats, playerStats, puntDistance, resolveMatch, sortGameResults, valueOf, yd,
 } from "./game-engine";
 import type { User } from "firebase/auth";
@@ -124,6 +124,7 @@ export default function FirstAndTen() {
       pass: `${O} completes a pass for ${yd(g)} vs ${D}.`, wideopen: `${O} finds a receiver wide open for ${yd(g)} vs ${D}.`,
       breakaway: `${O} breaks free for ${yd(g)} vs ${D}!`, stuff: `${O} is stuffed at the line by ${D} — no gain.`,
       sack: `${D} sacks ${O} for a loss of 5.`, interception: `${O} is intercepted by ${D}!`,
+      fumble: `${O} fumbles! ${D} recovers at the spot.`,
     };
     return lines[result.kind] || "";
   };
@@ -136,17 +137,17 @@ export default function FirstAndTen() {
         ? `Broken play — ${nameOf(offense, s)} (${cardStr(o)}) and ${nameOf(defense, s)} (${cardStr(d)}) tie. ${nameOf(defense, s)} recovers the fumble.`
         : playNarrative(s, result, o, d);
     if (s.twoPoint) {
-      const good = tieKind === "recover" || (result.kind !== "interception" && result.gain !== undefined && result.gain >= 2);
+      const good = tieKind === "recover" || (!["interception", "fumble"].includes(result.kind) && result.gain !== undefined && result.gain >= 2);
       if (good) { addPoints(s, offense, 2); s.stats[offense].twoPointMade += 1; }
       else s.stats[offense].twoPointMissed += 1;
       addLog(s, `${narrative} Two-point try is ${good ? "GOOD! (+2)" : "no good."}`);
       afterScore(s, offense, `Two-point try: ${good ? "GOOD (+2)." : "no good."}`);
       return;
     }
-    if (tieKind === "fumble" || result.kind === "interception") {
+    if (tieKind === "fumble" || result.kind === "interception" || result.kind === "fumble") {
       s.stats[offense].turnovers += 1;
       addLog(s, narrative);
-      const spot = result.kind === "interception" ? interceptionStart(los) : 100 - los;
+      const spot = result.kind === "interception" ? interceptionStart(los) : fumbleStart(los);
       const msg = result.kind === "interception"
         ? (los >= 80 ? `Intercepted by ${nameOf(defense, s)} in the end zone area — touchback. ${nameOf(defense, s)} starts at its own 20.` : `Intercepted by ${nameOf(defense, s)}! Returned to ${nameOf(defense, s)}'s own ${Math.min(spot, 100 - spot)}.`)
         : `Fumble! ${nameOf(defense, s)} recovers at the spot.`;
@@ -378,7 +379,7 @@ function RulesContent(){return <div className="rules-content"><ol className="rul
   <li><strong>Set up.</strong> Choose physical cards or the in-app virtual deck. Each player uses a hidden five-card hand. Black cards are runs; red cards are passes. Card values are face value, J/Q/K = 12, and Ace = 20.</li>
   <li><strong>Play a down.</strong> Offense and defense each choose a card, then reveal together. In virtual mode, pass the device when prompted; the app keeps both choices hidden until reveal.</li>
 </ol><div className="rules-table-wrap"><table className="rules-table"><thead><tr><th>Offense</th><th>Defense</th><th>Result</th></tr></thead><tbody><tr><td>Run</td><td>Run</td><td>Defense equal/higher: 0. Otherwise, offense minus defense.</td></tr><tr><td>Run</td><td>Pass</td><td>Add both values.</td></tr><tr><td>Pass</td><td>Pass</td><td>Defense equal/higher: sack, −5. Otherwise, offense minus defense.</td></tr><tr><td>Pass</td><td>Run</td><td>Add both values.</td></tr></tbody></table></div><ol className="rules-steps" start={3}>
-  <li><strong>Handle special cards.</strong> Matching ranks cause a draw: red means offense recovers and gains that card&apos;s value; black means defense recovers. A non-tied offensive Ace is an interception against the same color, or a breakaway for 20 plus the defense card against the other color.</li>
+  <li><strong>Handle special cards.</strong> Matching ranks cause a draw: red means offense recovers and gains that card&apos;s value; black means defense recovers. A non-tied red offensive Ace against red defense is an interception; a black offensive Ace against black defense is a fumble at the spot. Either Ace against the opposite color is a breakaway for 20 plus the defense card.</li>
   <li><strong>Move the chains.</strong> Gain 10 yards within four downs for a first down. On fourth down, go for it, punt, or try a field goal when within 60 yards.</li>
   <li><strong>Kick.</strong> Punt distance is rank × 5 (Ace = 70); a punt into the end zone is a touchback at the 20. Field-goal minimums by distance are: 1–20 yards = 4, 21–30 = 5, 31–40 = 7, 41–50 = 9, 51–60 = J.</li>
   <li><strong>Score.</strong> Touchdown = 6, extra point = 1 (draw a rank: 4 or higher is good; 2 or 3 misses), two-point try = 2 (one normal play from the 2), field goal = 3, safety = 2.</li>

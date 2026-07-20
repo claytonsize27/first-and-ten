@@ -7,7 +7,7 @@ export type Suit = (typeof SUITS)[number];
 export type VirtualCard = Card & { id: string; suit: Suit };
 export type VirtualDeckState = { drawPile: VirtualCard[]; discardPile: VirtualCard[] };
 export type MatchResult = {
-  kind: "run" | "runbit" | "pass" | "wideopen" | "breakaway" | "stuff" | "sack" | "interception" | "tie";
+  kind: "run" | "runbit" | "pass" | "wideopen" | "breakaway" | "stuff" | "sack" | "interception" | "fumble" | "tie";
   gain?: number;
   turnoverType?: "interception";
 };
@@ -53,9 +53,9 @@ export function resolveMatch(offense: Card, defense: Card): MatchResult {
   const ov = valueOf(offense.rank);
   const dv = valueOf(defense.rank);
   if (offense.rank === "A") {
-    return offense.color === defense.color
-      ? { kind: "interception", turnoverType: "interception" }
-      : { kind: "breakaway", gain: 20 + dv };
+    if (offense.color === "red" && defense.color === "red") return { kind: "interception", turnoverType: "interception" };
+    if (offense.color === "black" && defense.color === "black") return { kind: "fumble" };
+    return { kind: "breakaway", gain: 20 + dv };
   }
   if (offense.color === "black" && defense.color === "black") {
     return dv >= ov ? { kind: "stuff", gain: 0 } : { kind: "run", gain: ov - dv };
@@ -69,6 +69,10 @@ export function resolveMatch(offense: Card, defense: Card): MatchResult {
 
 export function interceptionStart(ballPos: number) {
   return ballPos >= 80 ? 20 : 80 - ballPos;
+}
+
+export function fumbleStart(ballPos: number) {
+  return 100 - ballPos;
 }
 
 export function fgMinRank(ballPos: number): Rank | null {

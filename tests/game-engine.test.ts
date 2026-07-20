@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { buildVirtualDeck, cardStr, dealVirtualDeck, drawOneVirtual, emptyPlayerGameStats, extraPointGood, fieldGoalGood, fgMinRank, fieldPercent, gamePlayerStats, gameSortMetric, interceptionStart, playerStats, puntDistance, resolveMatch, sortGameResults, valueOf } from "../app/game-engine.ts";
+import { buildVirtualDeck, cardStr, dealVirtualDeck, drawOneVirtual, emptyPlayerGameStats, extraPointGood, fieldGoalGood, fgMinRank, fieldPercent, fumbleStart, gamePlayerStats, gameSortMetric, interceptionStart, playerStats, puntDistance, resolveMatch, sortGameResults, valueOf } from "../app/game-engine.ts";
 
 test("resolution chart and card values", () => {
   assert.equal(resolveMatch({color:"black",rank:"5"},{color:"black",rank:"8"}).gain, 0);
@@ -16,9 +16,12 @@ test("resolution chart and card values", () => {
 test("aces, ties and interception placement", () => {
   assert.equal(resolveMatch({color:"red",rank:"A"},{color:"red",rank:"6"}).kind, "interception");
   assert.equal(resolveMatch({color:"red",rank:"A"},{color:"black",rank:"6"}).gain, 26);
+  assert.equal(resolveMatch({color:"black",rank:"A"},{color:"black",rank:"6"}).kind, "fumble");
+  assert.equal(resolveMatch({color:"black",rank:"A"},{color:"red",rank:"6"}).gain, 26);
   assert.equal(resolveMatch({color:"black",rank:"8"},{color:"red",rank:"8"}).kind, "tie");
   assert.equal(interceptionStart(30), 50); assert.equal(interceptionStart(79), 1);
   assert.equal(interceptionStart(80), 20); assert.equal(interceptionStart(95), 20);
+  assert.equal(fumbleStart(30), 70); assert.equal(fumbleStart(95), 5);
 });
 
 test("distance-scaled field goals", () => {

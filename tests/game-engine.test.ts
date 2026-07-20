@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { buildVirtualDeck, cardStr, dealVirtualDeck, drawOneVirtual, emptyPlayerGameStats, extraPointGood, fieldGoalGood, fgMinRank, fieldPercent, fumbleStart, gamePlayerStats, gameSortMetric, interceptionStart, playerStats, puntDistance, resolveMatch, sortGameResults, valueOf } from "../app/game-engine.ts";
+import { buildVirtualDeck, cardStr, dealVirtualDeck, drawOneVirtual, emptyPlayerGameStats, extraPointGood, fieldGoalGood, fgMinRank, fieldPercent, filterGameResults, fumbleStart, gamePlayerStats, gameSortMetric, interceptionStart, isCpuGame, playerStats, puntDistance, resolveMatch, sortGameResults, valueOf } from "../app/game-engine.ts";
+import { CPU_PROFILES, chooseCpuCard, chooseCpuConversion, chooseCpuFourthDown, chooseCpuKickoff, getCpuProfile, type CpuCardContext } from "../app/cpu-engine.ts";
 
 test("resolution chart and card values", () => {
   assert.equal(resolveMatch({color:"black",rank:"5"},{color:"black",rank:"8"}).gain, 0);
@@ -101,4 +102,36 @@ test("virtual draws reshuffle discards and feed the same downstream card rules",
   const virtualOffense=deck.find((card)=>card.rank==="8"&&card.suit==="♥")!,virtualDefense=deck.find((card)=>card.rank==="5"&&card.suit==="♠")!;
   assert.deepEqual(resolveMatch(virtualOffense,virtualDefense),resolveMatch({rank:"8",color:"red"},{rank:"5",color:"black"}));
   assert.equal(cardStr(virtualOffense),cardStr({rank:"8",color:"red"}));
+});
+
+test("CPU roster has stable identities and increasing ratings", () => {
+  assert.deepEqual(CPU_PROFILES.map(cpu=>cpu.id),["cpu_rookie_riley","cpu_coach_morgan","cpu_captain_harper","cpu_commissioner"]);
+  assert.deepEqual(CPU_PROFILES.map(cpu=>cpu.stars),[2,3,4,5]);
+  assert.equal(getCpuProfile("cpu_commissioner")?.difficulty,"EXPERT");
+  assert.equal(getCpuProfile("unknown"),null);
+});
+
+test("CPU card selection is deterministic, legal, and uses only supplied public context", () => {
+  const deck=buildVirtualDeck(),hand=deck.slice(0,5);
+  const context:CpuCardContext={role:"offense",down:3,distance:7,ballPos:63,cpuScore:7,humanScore:10,possessionNum:7,overtime:false,twoPoint:false,publicCards:deck.slice(10,18),humanPlayHistory:[{color:"red",down:2,distance:6}],decisionSeed:12345,decisionIndex:4};
+  for(const cpu of CPU_PROFILES){const first=chooseCpuCard(cpu.id,hand,context),second=chooseCpuCard(cpu.id,hand,{...context});assert.equal(first.id,second.id);assert.ok(hand.some(card=>card.id===first.id));}
+  const externalHiddenCards=deck.slice(30,35);
+  assert.ok(externalHiddenCards.length===5);
+  assert.equal(chooseCpuCard("cpu_commissioner",hand,context).id,chooseCpuCard("cpu_commissioner",hand,context).id);
+});
+
+test("CPU strategic decisions remain legal across game situations", () => {
+  const base={down:4,distance:4,ballPos:75,cpuScore:10,humanScore:13,possessionNum:8,overtime:false,twoPoint:false,decisionSeed:77,decisionIndex:2};
+  for(const cpu of CPU_PROFILES){assert.ok(["go","punt","fg"].includes(chooseCpuFourthDown(cpu.id,base)));assert.ok(["xp","two"].includes(chooseCpuConversion(cpu.id,base)));assert.ok(["deep","onside"].includes(chooseCpuKickoff(cpu.id,base)));}
+  for(const cpu of CPU_PROFILES)assert.notEqual(chooseCpuFourthDown(cpu.id,{...base,ballPos:30}),"fg");
+});
+
+test("history identifies and filters CPU games while preserving legacy human games", () => {
+  const base={playedAt:1,p1PlayerId:"a",p1Name:"A",p1Score:7,p2Score:3,winnerPlayerId:"a",overtime:false,finalPossessionNum:8};
+  const human={...base,id:"human",p2PlayerId:"b",p2Name:"B"};
+  const cpu={...base,id:"cpu",p2PlayerId:"cpu_rookie_riley",p2Name:"Rookie Riley",opponentType:"cpu" as const,cpuId:"cpu_rookie_riley"};
+  assert.equal(isCpuGame(human),false);assert.equal(isCpuGame(cpu),true);
+  assert.deepEqual(filterGameResults([human,cpu],"human").map(game=>game.id),["human"]);
+  assert.deepEqual(filterGameResults([human,cpu],"cpu").map(game=>game.id),["cpu"]);
+  assert.deepEqual(filterGameResults([human,cpu],"cpu_rookie_riley").map(game=>game.id),["cpu"]);
 });

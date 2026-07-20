@@ -135,7 +135,20 @@ export type GameResult = {
   p1Name: string; p2Name: string; p1Score: number; p2Score: number;
   winnerPlayerId: string; overtime: boolean; finalPossessionNum: number;
   stats?: { p1: PlayerGameStats; p2: PlayerGameStats };
+  gameMode?: "physical" | "virtual"; opponentType?: "human" | "cpu";
+  cpuId?: string; cpuName?: string; cpuDifficulty?: string; cpuStars?: number;
 };
+
+export function isCpuGame(game: GameResult) {
+  return game.opponentType === "cpu" || Boolean(game.cpuId) || game.p2PlayerId.startsWith("cpu_");
+}
+
+export function filterGameResults(games: GameResult[], filter = "all") {
+  if (filter === "human") return games.filter((game) => !isCpuGame(game));
+  if (filter === "cpu") return games.filter(isCpuGame);
+  if (filter.startsWith("cpu_")) return games.filter((game) => isCpuGame(game) && (game.cpuId ?? game.p2PlayerId) === filter);
+  return games;
+}
 
 export function gamePlayerStats(game: GameResult, team: "p1" | "p2") {
   const saved = game.stats?.[team];

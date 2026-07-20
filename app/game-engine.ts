@@ -2,6 +2,10 @@ export const RANKS = ["2", "3", "4", "5", "6", "7", "8", "9", "10", "J", "Q", "K
 export type Rank = (typeof RANKS)[number];
 export type CardColor = "black" | "red";
 export type Card = { color: CardColor; rank: Rank };
+export const SUITS = ["♠", "♥", "♦", "♣"] as const;
+export type Suit = (typeof SUITS)[number];
+export type VirtualCard = Card & { id: string; suit: Suit };
+export type VirtualDeckState = { drawPile: VirtualCard[]; discardPile: VirtualCard[] };
 export type MatchResult = {
   kind: "run" | "runbit" | "pass" | "wideopen" | "breakaway" | "stuff" | "sack" | "interception" | "tie";
   gain?: number;
@@ -12,6 +16,36 @@ export function valueOf(rank: Rank) {
   if (rank === "A") return 20;
   if (["J", "Q", "K"].includes(rank)) return 12;
   return Number(rank);
+}
+
+export function buildVirtualDeck(): VirtualCard[] {
+  return RANKS.flatMap((rank) => SUITS.map((suit) => ({
+    id: `${rank}-${suit}`, rank, suit,
+    color: (suit === "♠" || suit === "♣" ? "black" : "red") as CardColor,
+  })));
+}
+
+export function shuffleCards<T>(cards: T[], random: () => number = Math.random) {
+  const shuffled = [...cards];
+  for (let i = shuffled.length - 1; i > 0; i -= 1) {
+    const j = Math.floor(random() * (i + 1));
+    [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
+  }
+  return shuffled;
+}
+
+export function dealVirtualDeck(random: () => number = Math.random) {
+  const drawPile = shuffleCards(buildVirtualDeck(), random), p1Hand: VirtualCard[] = [], p2Hand: VirtualCard[] = [];
+  for (let i = 0; i < 5; i += 1) { p1Hand.push(drawPile.pop()!); p2Hand.push(drawPile.pop()!); }
+  return { drawPile, discardPile: [] as VirtualCard[], p1Hand, p2Hand };
+}
+
+export function drawOneVirtual(state: VirtualDeckState, random: () => number = Math.random) {
+  let drawPile = [...state.drawPile], discardPile = [...state.discardPile], reshuffled = false;
+  if (!drawPile.length) { drawPile = shuffleCards(discardPile, random); discardPile = []; reshuffled = true; }
+  const card = drawPile.pop();
+  if (!card) throw new Error("Virtual deck has no card available.");
+  return { card, drawPile, discardPile, reshuffled };
 }
 
 export function resolveMatch(offense: Card, defense: Card): MatchResult {

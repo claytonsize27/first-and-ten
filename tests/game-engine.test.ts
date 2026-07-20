@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { emptyPlayerGameStats, extraPointGood, fieldGoalGood, fgMinRank, fieldPercent, gamePlayerStats, gameSortMetric, interceptionStart, playerStats, puntDistance, resolveMatch, sortGameResults, valueOf } from "../app/game-engine.ts";
+import { buildVirtualDeck, cardStr, dealVirtualDeck, drawOneVirtual, emptyPlayerGameStats, extraPointGood, fieldGoalGood, fgMinRank, fieldPercent, gamePlayerStats, gameSortMetric, interceptionStart, playerStats, puntDistance, resolveMatch, sortGameResults, valueOf } from "../app/game-engine.ts";
 
 test("resolution chart and card values", () => {
   assert.equal(resolveMatch({color:"black",rank:"5"},{color:"black",rank:"8"}).gain, 0);
@@ -67,4 +67,35 @@ test("history defaults to most recently played first", () => {
   const base = {p1PlayerId:"a",p2PlayerId:"b",p1Name:"A",p2Name:"B",p1Score:7,p2Score:3,winnerPlayerId:"a",overtime:false,finalPossessionNum:8};
   const games = [{...base,id:"middle",playedAt:200},{...base,id:"oldest",playedAt:100},{...base,id:"newest",playedAt:300}];
   assert.deepEqual(sortGameResults(games).map((game) => game.id), ["newest","middle","oldest"]);
+});
+
+test("virtual deck has the exact standard 52-card distribution", () => {
+  const deck = buildVirtualDeck();
+  assert.equal(deck.length, 52);
+  assert.equal(new Set(deck.map((card) => card.id)).size, 52);
+  assert.equal(deck.filter((card) => card.color === "black").length, 26);
+  assert.equal(deck.filter((card) => card.color === "red").length, 26);
+  for (const rank of ["2","3","4","5","6","7","8","9","10","J","Q","K","A"]) assert.equal(deck.filter((card) => card.rank === rank).length, 4);
+});
+
+test("virtual deal and repeated reshuffles conserve all cards", () => {
+  const dealt = dealVirtualDeck(() => 0.5);
+  assert.equal(dealt.p1Hand.length, 5); assert.equal(dealt.p2Hand.length, 5);
+  assert.equal(dealt.drawPile.length, 42); assert.equal(dealt.discardPile.length, 0);
+  let state = { drawPile: dealt.drawPile, discardPile: dealt.discardPile }, reshuffles = 0;
+  for (let i = 0; i < 500; i += 1) {
+    const draw = drawOneVirtual(state, () => 0.25); if (draw.reshuffled) reshuffles += 1;
+    state = { drawPile: draw.drawPile, discardPile: [...draw.discardPile, draw.card] };
+    assert.equal(dealt.p1Hand.length + dealt.p2Hand.length + state.drawPile.length + state.discardPile.length, 52);
+    assert.equal(new Set([...dealt.p1Hand,...dealt.p2Hand,...state.drawPile,...state.discardPile].map((card) => card.id)).size, 52);
+  }
+  assert.ok(reshuffles > 0);
+});
+
+test("virtual draws reshuffle discards and feed the same downstream card rules", () => {
+  const deck = buildVirtualDeck(), draw = drawOneVirtual({drawPile:[],discardPile:deck.slice(0,3)},()=>0.5);
+  assert.equal(draw.reshuffled,true); assert.equal(draw.drawPile.length,2); assert.equal(draw.discardPile.length,0);
+  const virtualOffense=deck.find((card)=>card.rank==="8"&&card.suit==="♥")!,virtualDefense=deck.find((card)=>card.rank==="5"&&card.suit==="♠")!;
+  assert.deepEqual(resolveMatch(virtualOffense,virtualDefense),resolveMatch({rank:"8",color:"red"},{rank:"5",color:"black"}));
+  assert.equal(cardStr(virtualOffense),cardStr({rank:"8",color:"red"}));
 });

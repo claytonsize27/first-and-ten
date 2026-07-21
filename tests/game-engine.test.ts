@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { buildVirtualDeck, cardStr, compareOpeningCards, cpuMatchupRecord, dealVirtualDeck, downDistanceLabel, drawOneVirtual, emptyPlayerGameStats, extraPointGood, fieldGoalGood, fgMinRank, fieldPercent, filterGameResults, fumbleStart, gamePlayerStats, gameSortMetric, interceptionStart, isCpuGame, openingReceiverForChoice, playerStats, puntDistance, recordExtraPointResult, resolveMatch, sortGameResults, valueOf } from "../app/game-engine.ts";
+import { buildVirtualDeck, cardStr, compareOpeningCards, cpuMatchupRecord, dealVirtualDeck, downDistanceLabel, drawOneVirtual, emptyPlayerGameStats, evaluateMathematicalMercy, extraPointGood, fieldGoalGood, fgMinRank, fieldPercent, filterGameResults, formatMercyExplanation, fumbleStart, gamePlayerStats, gameSortMetric, interceptionStart, isCpuGame, openingReceiverForChoice, playerStats, puntDistance, recordExtraPointResult, resolveMatch, sortGameResults, valueOf } from "../app/game-engine.ts";
 import { CPU_PROFILES, chooseCpuCard, chooseCpuConversion, chooseCpuFourthDown, chooseCpuKickoff, chooseCpuOpeningChoice, getCpuProfile, type CpuCardContext } from "../app/cpu-engine.ts";
 
 test("resolution chart and card values", () => {
@@ -186,4 +186,52 @@ test("CPU matchup records are calculated from the named CPU perspective", () => 
   ];
   assert.deepEqual(cpuMatchupRecord(games,"cpu_commissioner"),{played:5,wins:1,losses:3});
   assert.deepEqual(cpuMatchupRecord(games,"cpu_rookie_riley"),{played:0,wins:0,losses:0});
+});
+
+test("mathematical mercy is disabled in overtime, when off, while tied, and on invalid state", () => {
+  const base={scores:{p1:30,p2:0},completedPossession:6,nextOffense:"p2" as const,firstHalfOpener:"p1" as const,enabled:true,overtime:false};
+  assert.equal(evaluateMathematicalMercy({...base,enabled:false}).shouldEnd,false);
+  assert.equal(evaluateMathematicalMercy({...base,overtime:true}).shouldEnd,false);
+  assert.equal(evaluateMathematicalMercy({...base,scores:{p1:14,p2:14}}).shouldEnd,false);
+  assert.equal(evaluateMathematicalMercy({...base,nextOffense:null}).shouldEnd,false);
+  assert.equal(evaluateMathematicalMercy({...base,scores:{p1:Number.NaN,p2:0}}).shouldEnd,false);
+});
+
+test("final possession ownership uses exact eight-point offense and two-point safety limits", () => {
+  for(let deficit=1;deficit<=8;deficit+=1){
+    const result=evaluateMathematicalMercy({scores:{p1:20,p2:20-deficit},completedPossession:7,nextOffense:"p2",firstHalfOpener:"p1",enabled:true,overtime:false});
+    assert.equal(result.shouldEnd,false,`trailer offense deficit ${deficit}`);assert.equal(result.maximumComeback,8);
+  }
+  const nine=evaluateMathematicalMercy({scores:{p1:20,p2:11},completedPossession:7,nextOffense:"p2",firstHalfOpener:"p1",enabled:true,overtime:false});
+  assert.equal(nine.shouldEnd,true);assert.equal(nine.bestFinalDifferential,-1);
+  for(let deficit=1;deficit<=2;deficit+=1){
+    const result=evaluateMathematicalMercy({scores:{p1:20,p2:20-deficit},completedPossession:7,nextOffense:"p1",firstHalfOpener:"p1",enabled:true,overtime:false});
+    assert.equal(result.shouldEnd,false,`leader offense deficit ${deficit}`);assert.equal(result.maximumComeback,2);
+  }
+  assert.equal(evaluateMathematicalMercy({scores:{p1:20,p2:17},completedPossession:7,nextOffense:"p1",firstHalfOpener:"p1",enabled:true,overtime:false}).shouldEnd,true);
+});
+
+test("exact reachability includes conversions, onside recoveries, and halftime ownership", () => {
+  const afterFive=(deficit:number)=>evaluateMathematicalMercy({scores:{p1:32,p2:32-deficit},completedPossession:5,nextOffense:"p2",firstHalfOpener:"p1",enabled:true,overtime:false});
+  assert.equal(afterFive(24).shouldEnd,false);assert.equal(afterFive(24).maximumComeback,24);assert.equal(afterFive(25).shouldEnd,true);
+  const halftime=(deficit:number)=>evaluateMathematicalMercy({scores:{p1:40,p2:40-deficit},completedPossession:4,nextOffense:"p2",firstHalfOpener:"p1",enabled:true,overtime:false});
+  assert.equal(halftime(32).shouldEnd,false);assert.equal(halftime(32).maximumComeback,32);assert.equal(halftime(33).shouldEnd,true);
+  const leaderOpensSecondHalf=(deficit:number)=>evaluateMathematicalMercy({scores:{p1:40,p2:40-deficit},completedPossession:4,nextOffense:"p1",firstHalfOpener:"p2",enabled:true,overtime:false});
+  assert.equal(leaderOpensSecondHalf(26).shouldEnd,false);assert.equal(leaderOpensSecondHalf(26).maximumComeback,26);assert.equal(leaderOpensSecondHalf(27).shouldEnd,true);
+  assert.deepEqual(afterFive(25),afterFive(25),"evaluation is deterministic");
+});
+
+test("mathematical mercy explanation and saved-game metadata remain legacy compatible", () => {
+  const result=evaluateMathematicalMercy({scores:{p1:20,p2:11},completedPossession:7,nextOffense:"p2",firstHalfOpener:"p1",enabled:true,overtime:false});
+  const explanation=formatMercyExplanation(result,{p1:"Austin",p2:"Clayton"},{p1:20,p2:11},7);
+  assert.match(explanation,/Austin leads Clayton 20–11/);assert.match(explanation,/No onside kick is available after possession 8/);assert.match(explanation,/Overtime is impossible/);
+  const legacy={id:"legacy-mercy",playedAt:1,p1PlayerId:"a",p2PlayerId:"b",p1Name:"A",p2Name:"B",p1Score:7,p2Score:0,winnerPlayerId:"a",overtime:false,finalPossessionNum:8};
+  assert.equal("endReason" in legacy,false);assert.deepEqual(gamePlayerStats(legacy,"p1"),emptyPlayerGameStats(7));
+});
+
+test("CPU conversion logic preserves the required late two-point path", () => {
+  const postTouchdown={down:1,distance:2,ballPos:98,cpuScore:14,humanScore:22,possessionNum:8,overtime:false,decisionSeed:19,decisionIndex:3};
+  for(const cpu of CPU_PROFILES)assert.equal(chooseCpuConversion(cpu.id,postTouchdown),"two");
+  const tieOnly={...postTouchdown,cpuScore:20};
+  for(const cpu of CPU_PROFILES)assert.equal(chooseCpuConversion(cpu.id,tieOnly),"two");
 });

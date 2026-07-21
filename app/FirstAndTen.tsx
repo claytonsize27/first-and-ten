@@ -1,20 +1,20 @@
 "use client";
 
-import { FormEvent, useEffect, useMemo, useState } from "react";
+import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import {
   Card, CardColor, GameResult, MatchResult, PlayerGameStats, PlayerProfile, RANKS, Rank, VirtualCard,
-  cardStr, displaySpot, extraPointGood, fgMinRank, fieldGoalGood, fieldPercent, fumbleStart, interceptionStart, ordinal,
-  dealVirtualDeck, drawOneVirtual, emptyPlayerGameStats, filterGameResults, gamePlayerStats, isCpuGame, playerStats, puntDistance, resolveMatch, sortGameResults, valueOf, yd,
+  buildVirtualDeck, cardStr, compareOpeningCards, cpuMatchupRecord, displaySpot, downDistanceLabel, extraPointGood, fgMinRank, fieldGoalGood, fieldPercent, fumbleStart, interceptionStart, ordinal,
+  dealVirtualDeck, drawOneVirtual, emptyPlayerGameStats, filterGameResults, gamePlayerStats, isCpuGame, openingReceiverForChoice, playerStats, puntDistance, recordExtraPointResult, resolveMatch, shuffleCards, sortGameResults, valueOf, yd,
 } from "./game-engine";
 import {
-  CPU_PROFILES, chooseCpuCard, chooseCpuConversion, chooseCpuFourthDown, chooseCpuKickoff, getCpuProfile,
+  CPU_PROFILES, chooseCpuCard, chooseCpuConversion, chooseCpuFourthDown, chooseCpuKickoff, chooseCpuOpeningChoice, getCpuProfile,
   type CpuCardContext, type CpuId, type PublicHumanPlay,
 } from "./cpu-engine";
 import type { User } from "firebase/auth";
 import { cloudConfigured, saveCloudState, signInToCloud, signOutOfCloud, watchAuth, watchCloudState } from "./cloud-store";
 
 type Team = "p1" | "p2";
-type Phase = "home" | "deckMode" | "names" | "possession" | "play" | "pat" | "onsideChoice" | "suddenDeathStart" | "gameOver" | "rules" | "history";
+type Phase = "home" | "deckMode" | "names" | "openingDraw" | "possession" | "play" | "pat" | "onsideChoice" | "suddenDeathStart" | "gameOver" | "rules" | "history";
 type SubMode = null | "tie" | "fg" | "punt" | "xp" | "onside";
 type GameMode = null | "physical" | "virtual";
 type TurnStage = null | "offenseSelect" | "handoff" | "defenseSelect" | "cpuChoosing" | "reveal";
@@ -31,6 +31,8 @@ type Session = {
   pendingOffenseCard: VirtualCard | null; pendingDefenseCard: VirtualCard | null;
   pendingTieBreakCard: VirtualCard | null; pendingSubDrawCard: VirtualCard | null;
   cpuId: CpuId | null; cpuSeed: number; cpuDecisionIndex: number; humanPlayHistory: PublicHumanPlay[];
+  openingDrawPile: VirtualCard[]; openingHumanCard: VirtualCard | null; openingCpuCard: VirtualCard | null;
+  openingWinner: Team | null; openingChoice: "receive" | "kick" | null; openingTieCount: number;
   resultSaved: null | boolean;
 };
 
@@ -44,6 +46,7 @@ const initial = (phase: Phase = "home"): Session => ({
   gameMode: null, drawPile: [], discardPile: [], p1Hand: [], p2Hand: [], turnStage: null,
   pendingOffenseCard: null, pendingDefenseCard: null, pendingTieBreakCard: null, pendingSubDrawCard: null,
   cpuId: null, cpuSeed: 0, cpuDecisionIndex: 0, humanPlayHistory: [],
+  openingDrawPile: [], openingHumanCard: null, openingCpuCard: null, openingWinner: null, openingChoice: null, openingTieCount: 0,
 });
 const other = (team: Team): Team => team === "p1" ? "p2" : "p1";
 const uid = () => globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`;
@@ -68,6 +71,7 @@ export default function FirstAndTen() {
   const [showRules, setShowRules] = useState(false);
   const [selectedVirtualCard, setSelectedVirtualCard] = useState("");
   const [openingReceiver, setOpeningReceiver] = useState<Team | null>(null);
+  const openingDrawLock = useRef(false);
   const [player2Kind, setPlayer2Kind] = useState<"human" | "cpu">("human");
   const [selectedCpuId, setSelectedCpuId] = useState<CpuId | null>(null);
 
@@ -209,6 +213,7 @@ export default function FirstAndTen() {
     }
     if (mode === "xp" && rank && s.scoringTeam) {
       const good = extraPointGood(rank); if (good) addPoints(s, s.scoringTeam, 1);
+      recordExtraPointResult(s.stats[s.scoringTeam],good);
       addLog(s, `${nameOf(s.scoringTeam, s)} extra point is ${good ? "good. (+1)" : "no good."}`);
       afterScore(s, s.scoringTeam, `${nameOf(s.scoringTeam, s)} TD — extra point ${good ? "GOOD (+1)." : "missed."}`);
     }
@@ -310,19 +315,32 @@ export default function FirstAndTen() {
   };
   const confirmCpuGame = () => {
     const cpu = getCpuProfile(selectedCpuId); if (!cpu) return;
+    const openingState = { phase: "openingDraw" as Phase, openingDrawPile: shuffleCards(buildVirtualDeck()), openingHumanCard: null, openingCpuCard: null, openingWinner: null, openingChoice: null, openingTieCount: 0, cpuSeed: Math.floor(Math.random() * 0xFFFFFFFF) };
     if (guestMode) {
       const p1 = newNames.p1.trim(); if (!p1) return;
-      setSession((s) => ({ ...s, phase: "possession", p1, p2: cpu.name, p1PlayerId: "", p2PlayerId: cpu.id, cpuId: cpu.id }));
+      setSession((s) => ({ ...s, ...openingState, p1, p2: cpu.name, p1PlayerId: "", p2PlayerId: cpu.id, cpuId: cpu.id }));
       return;
     }
     const p1 = players.find((player) => player.id === selected.p1); if (!p1) return;
-    setSession((s) => ({ ...s, phase: "possession", p1: p1.name, p2: cpu.name, p1PlayerId: p1.id, p2PlayerId: cpu.id, cpuId: cpu.id }));
+    setSession((s) => ({ ...s, ...openingState, p1: p1.name, p2: cpu.name, p1PlayerId: p1.id, p2PlayerId: cpu.id, cpuId: cpu.id }));
   };
   const continueAsGuest = () => {
     setGuestMode(true); setCloudError(""); setPlayers([]); setGames([]);
     setNewNames({ p1: "", p2: "" }); resetSetup("home");
   };
-  const startGame = (team: Team) => { setOpeningReceiver(null); act((s) => { if (s.gameMode === "virtual") Object.assign(s, dealVirtualDeck()); return { ...s, firstHalfOpener: team, offense: team, possessionNum: 1, ballPos: 20, down: 1, lineToGain: 30, phase: "play", cpuSeed: s.cpuId ? Math.floor(Math.random() * 0xFFFFFFFF) : 0, cpuDecisionIndex: 0, humanPlayHistory: [], turnStage: s.gameMode === "virtual" ? "offenseSelect" : null }; }); };
+  const drawOpeningPair = () => {
+    if (openingDrawLock.current) return; openingDrawLock.current = true;
+    setSession((s) => {
+      if (s.phase !== "openingDraw" || s.openingWinner) return s;
+      let pile = s.openingDrawPile.length >= 2 ? [...s.openingDrawPile] : shuffleCards(buildVirtualDeck());
+      const human = pile.pop()!, cpu = pile.pop()!, comparison = compareOpeningCards(human, cpu);
+      const winner: Team | null = comparison > 0 ? "p1" : comparison < 0 ? "p2" : null;
+      return { ...s, openingDrawPile: pile, openingHumanCard: human, openingCpuCard: cpu, openingWinner: winner, openingChoice: winner === "p2" && s.cpuId ? chooseCpuOpeningChoice(s.cpuId, s.cpuSeed + s.openingTieCount) : null, openingTieCount: s.openingTieCount + (winner ? 0 : 1) };
+    });
+  };
+  useEffect(()=>{ openingDrawLock.current=false; },[session.openingHumanCard,session.openingCpuCard,session.openingWinner]);
+  const startGame = (team: Team) => { setOpeningReceiver(null); act((s) => { if (s.gameMode === "virtual") Object.assign(s, dealVirtualDeck()); return { ...s, firstHalfOpener: team, offense: team, possessionNum: 1, ballPos: 20, down: 1, lineToGain: 30, phase: "play", cpuSeed: s.cpuId ? Math.floor(Math.random() * 0xFFFFFFFF) : 0, cpuDecisionIndex: 0, humanPlayHistory: [], openingDrawPile: [], openingHumanCard: null, openingCpuCard: null, openingWinner: null, openingChoice: null, openingTieCount: 0, turnStage: s.gameMode === "virtual" ? "offenseSelect" : null }; }); };
+  const finishCpuOpening = (choice: "receive" | "kick") => { const winner=session.openingWinner; if(!winner||openingDrawLock.current)return; openingDrawLock.current=true; startGame(openingReceiverForChoice(winner,choice)); };
   const startNextDrive = () => {
     act((s) => {
       const n = s.possessionNum;
@@ -391,6 +409,7 @@ export default function FirstAndTen() {
   };
 
   const gameActive = ["play", "pat", "onsideChoice", "suddenDeathStart"].includes(session.phase);
+  const showDownStatus = session.phase === "play" && !session.driveOver && (!session.subMode || session.subMode === "tie");
   const quarter = session.overtime ? "OT" : `Q${Math.floor((session.possessionNum - 1) / 2) + 1}`;
   const distance = session.lineToGain === 100 && session.lineToGain - session.ballPos <= 10 ? "GOAL" : String(session.lineToGain - session.ballPos);
   const advanceLabel = !session.overtime && session.possessionNum >= 8 ? (session.scores.p1 === session.scores.p2 ? "Go to overtime" : "See final") : session.overtime && session.possessionNum % 2 === 0 && session.scores.p1 !== session.scores.p2 ? "See final" : !session.overtime && session.possessionNum === 4 ? "Start 2nd half" : "Start next drive";
@@ -419,16 +438,17 @@ export default function FirstAndTen() {
     {!gameActive && <div className={`account-bar ${guestMode ? "guest" : ""}`}><span>{guestMode ? "Guest mode · profiles and history are off" : `● Cloud synced · ${cloudUser?.email || "Google account"}`}</span><button onClick={() => guestMode ? setGuestMode(false) : void signOutOfCloud()}>{guestMode ? "Sign in for cloud sync" : "Sign out"}</button></div>}
     {cloudError && !gameActive && <p className="cloud-error" role="alert">Sync issue: {cloudError}</p>}
     {!gameActive && <nav className="tabs" aria-label="Primary">
-      <button className={["home","deckMode","names","possession"].includes(session.phase) ? "active" : ""} onClick={() => navigate("deckMode")}>New Game</button>
+      <button className={["home","deckMode","names","openingDraw","possession"].includes(session.phase) ? "active" : ""} onClick={() => navigate("deckMode")}>New Game</button>
       <button className={session.phase === "rules" ? "active" : ""} onClick={() => navigate("rules")}>Rules</button>
       {cloudUser && <button className={session.phase === "history" ? "active" : ""} onClick={() => navigate("history")}>History</button>}
     </nav>}
     {session.phase === "home" && <Home games={games.length} cloudEnabled={Boolean(cloudUser)} onNew={() => navigate("deckMode")} onHistory={() => navigate("history")} />}
     {session.phase === "deckMode" && <DeckModeScreen onChoose={chooseDeckMode} />}
     {session.phase === "names" && <section className="card"><Eyebrow>{guestMode?"Guest game":"Pre-game"}</Eyebrow><h2>Who&apos;s playing?</h2>{session.gameMode==="virtual"&&<PlayerTwoType value={player2Kind} onChange={choosePlayer2Kind}/>}<p className="helper">{guestMode?"Guest names disappear when the page is closed or refreshed.":"Pick a profile, or create a new one."} {session.gameMode==="physical"?"You’ll share this screen — offense enters their card, defense enters theirs.":player2Kind==="cpu"?"Choose a CPU opponent for Player 2.":"The app will deal hidden hands after you choose who receives first."}</p><div className={`setup-grid ${player2Kind==="cpu"?"single-player":""}`}>{(["p1",...(player2Kind==="human"?["p2"]:[])] as Team[]).map((team)=><PlayerSetupSlot key={team} team={team} guestMode={guestMode} players={players} selected={selected} setSelected={setSelected} newNames={newNames} setNewNames={setNewNames} createPlayer={createPlayer}/>)}</div>{session.gameMode==="virtual"&&player2Kind==="cpu"&&<><CpuRoster selected={selectedCpuId} onSelect={setSelectedCpuId}/><p className="cpu-fair-play"><strong>Fair play:</strong> CPU opponents use the same shuffled deck and cannot see your hand, your selected card, or upcoming cards.</p></>}<button className="primary full" disabled={player2Kind==="cpu"?(guestMode?!newNames.p1.trim()||!selectedCpuId:!selected.p1||!selectedCpuId):(guestMode?!newNames.p1.trim()||!newNames.p2.trim()||newNames.p1.trim().toLocaleLowerCase()===newNames.p2.trim().toLocaleLowerCase():!selected.p1||!selected.p2||selected.p1===selected.p2)} onClick={player2Kind==="cpu"?confirmCpuGame:guestMode?confirmGuestPlayers:confirmPlayers}>Continue</button></section>}
+    {session.phase === "openingDraw" && <OpeningDrawScreen s={session} draw={drawOpeningPair} choose={finishCpuOpening}/>}
     {session.phase === "possession" && <section className="card"><Eyebrow>Coin toss</Eyebrow><h2>Who receives first?</h2><p className="helper">{session.gameMode==="physical"?"Cut the deck: high card picks. ":"Choose the opening receiver. "}Possession flips at halftime.</p><div className="team-picks">{(["p1", "p2"] as Team[]).map((t) => <button className={`team-pick ${openingReceiver===t?"selected":""}`} aria-pressed={session.gameMode==="virtual"?openingReceiver===t:undefined} style={{ "--accent": accent(t) } as React.CSSProperties} key={t} onClick={() => session.gameMode==="virtual"?setOpeningReceiver(t):startGame(t)}><span className="dot" /> <strong>{nameOf(t)}</strong><small>RECEIVES FIRST</small></button>)}</div>{session.gameMode==="virtual"&&openingReceiver&&<button className="primary full start-handoff" onClick={()=>startGame(openingReceiver)}><strong>{session.cpuId?(openingReceiver==="p1"?`Start game as ${nameOf("p1")}`:`Start game — ${nameOf("p2")} receives first`):`Hand the phone to ${nameOf(openingReceiver)}`}</strong><small>{session.cpuId?(openingReceiver==="p1"?`${nameOf("p1")}, tap here to start the game.`:"The CPU will choose offense first."):`${nameOf(openingReceiver)}, tap here when you have the phone to start the game.`}</small></button>}</section>}
     {(["play", "pat", "onsideChoice"] as Phase[]).includes(session.phase) && <>
-      {!(session.gameMode==="virtual"&&session.turnStage==="handoff")&&<><Scoreboard s={session} quarter={quarter} /><Field s={session} />{session.gameMode==="virtual"&&<p className="deck-hud">{session.drawPile.length} cards left in the draw pile</p>}</>}
+      <><Scoreboard s={session} quarter={quarter} /><Field s={session} />{showDownStatus&&<p className="down-distance-status" aria-live="polite">{downDistanceLabel(session.down,session.ballPos,session.lineToGain,session.twoPoint)}</p>}{session.gameMode==="virtual"&&<p className="deck-hud">{session.drawPile.length} cards left in the draw pile</p>}</>
       {session.driveOver ? <section className="card possession-over"><Eyebrow>Possession over</Eyebrow><h2>{session.driveOverMsg}</h2>{session.gameMode==="virtual"&&advanceLabel==="Start next drive"&&<div className="amber-banner">{session.cpuId?(nextDriveOffense==="p2"?<><strong>{nameOf("p2")}</strong> will be on offense for the next drive.</>:<><strong>{nameOf("p1")}</strong>, you&apos;re on offense for the next drive.</>):<>Hand the phone to <strong>{nameOf(nextDriveOffense)}</strong> — {nameOf(nextDriveOffense)} will be on offense for the next drive.</>}</div>}{!session.overtime&&session.possessionNum===4&&<StatsSnapshot title="Halftime stats" p1Name={session.p1} p2Name={session.p2} stats={session.stats}/>}<button className="primary full" onClick={startNextDrive}>{advanceLabel}</button>{undoStack.length > 0 && <button className="undo-link" onClick={undo}>↶ Undo last play</button>}</section>
       : session.subMode ? (session.gameMode==="virtual"&&session.subMode!=="tie"?<VirtualSubPanel mode={session.subMode} s={session} narrative={virtualSubNarrative} draw={drawVirtualSubCard} proceed={continueVirtualSub} undo={undo} canUndo={undoStack.length>0}/>:<SubPanel mode={session.subMode} s={session} drawColor={drawColor} drawRank={drawRank} setDrawColor={setDrawColor} setDrawRank={setDrawRank} resolve={resolveSub} undo={undo} canUndo={undoStack.length > 0} />)
       : session.phase === "pat" ? (session.cpuId&&session.scoringTeam==="p2"?<CpuThinking name={session.p2} detail="Choosing an extra point or two-point try…"/>:<section className="card"><Eyebrow>Point after</Eyebrow><h2>Touchdown, {session.scoringTeam && nameOf(session.scoringTeam)}! What&apos;s the call?</h2><div className="choices"><button onClick={() => act((s) => ({ ...s, subMode: "xp" }))}><strong>Kick extra point</strong><small>Draw a rank · 4 or higher is good (+1)</small></button><button onClick={() => act((s) => ({ ...s, twoPoint: true, ballPos: 98, down: 1, lineToGain: 100, phase: "play" }))}><strong>Go for two</strong><small>Play one down from the 2 (+2)</small></button></div><button className="secondary" onClick={undo}>↶ Undo</button></section>)
@@ -452,8 +472,9 @@ function CpuRoster({selected,onSelect}:{selected:CpuId|null;onSelect:(id:CpuId)=
 function PlayerSetupSlot({team,guestMode,players,selected,setSelected,newNames,setNewNames,createPlayer}:{team:Team;guestMode:boolean;players:PlayerProfile[];selected:Record<Team,string>;setSelected:React.Dispatch<React.SetStateAction<Record<Team,string>>>;newNames:Record<Team,string>;setNewNames:React.Dispatch<React.SetStateAction<Record<Team,string>>>;createPlayer:(team:Team,event:FormEvent)=>void}){return <div className="profile-slot" style={{"--accent":team==="p1"?"var(--p1)":"var(--p2)"} as React.CSSProperties}><h3>{team==="p1"?"Player 1":"Player 2"}</h3>{guestMode?<><label className="sr-only" htmlFor={`guest-${team}`}>{team==="p1"?"Player 1":"Player 2"} name</label><input id={`guest-${team}`} placeholder="Player name" value={newNames[team]} onChange={e=>setNewNames(v=>({...v,[team]:e.target.value}))}/></>:<>{players.length>0&&<div className="chips">{[...players].sort((a,b)=>a.name.localeCompare(b.name)).map(p=>{const disabled=selected[other(team)]===p.id;return <button key={p.id} disabled={disabled} className={`chip ${selected[team]===p.id?"selected":""}`} onClick={()=>!disabled&&setSelected(v=>({...v,[team]:p.id}))}>{p.name}{disabled&&<small>selected</small>}</button>})}</div>}<form className="new-player" onSubmit={e=>createPlayer(team,e)}><label className="sr-only" htmlFor={`new-${team}`}>New {team==="p1"?"Player 1":"Player 2"} name</label><input id={`new-${team}`} placeholder="Player name" value={newNames[team]} onChange={e=>setNewNames(v=>({...v,[team]:e.target.value}))}/><button className="secondary" disabled={!newNames[team].trim()}>Add</button></form></>}</div>}
 function Home({games,cloudEnabled,onNew,onHistory}:{games:number;cloudEnabled:boolean;onNew:()=>void;onHistory:()=>void}){return <section className="card hero"><Eyebrow>Welcome</Eyebrow><h2>First &amp; Ten</h2><p className="helper">Track drives, downs, and scores for your card-football games.</p><div className="home-actions"><button className="primary" onClick={onNew}>New Game</button>{cloudEnabled&&<button className="alt" onClick={onHistory}>Game History</button>}</div>{cloudEnabled&&games>0&&<p className="recorded">{games} {games===1?"game":"games"} recorded</p>}</section>}
 function DeckModeScreen({onChoose}:{onChoose:(mode:"physical"|"virtual")=>void}){return <section className="card deck-mode"><Eyebrow>New game setup</Eyebrow><h2>Do you have physical cards with you?</h2><p className="helper">If you don&apos;t have a deck handy, First &amp; Ten can deal, shuffle, and pass the cards for you right on this screen.</p><div className="choices"><button onClick={()=>onChoose("physical")}><strong>I have physical cards</strong><small>Play with your own 52-card deck, as usual.</small></button><button onClick={()=>onChoose("virtual")}><strong>Use the virtual deck</strong><small>We&apos;ll deal hands and pass the phone between turns.</small></button></div></section>}
+function OpeningDrawScreen({s,draw,choose}:{s:Session;draw:()=>void;choose:(choice:"receive"|"kick")=>void}){const human=s.openingHumanCard,cpu=s.openingCpuCard,winner=s.openingWinner,tied=Boolean(human&&cpu&&!winner);return <section className="card opening-draw"><Eyebrow>Opening possession</Eyebrow><h2>High card chooses</h2><p className="helper">{s.p1} and {s.p2} each draw from a temporary full deck. Ace is high; matching ranks draw again. These cards are returned before gameplay is dealt.</p>{human&&cpu&&<div className="opening-cards"><div><span>{s.p1}</span><PlayingCard card={human} size="draw"/></div><div><span>{s.p2} · CPU</span><PlayingCard card={cpu} size="draw"/></div></div>}{!human&&!cpu&&<button className="primary full" onClick={draw}>Draw cards</button>}{tied&&<div className="opening-result" role="status"><strong>Same rank — the opening draw is tied.</strong><p>Draw another card for each participant.</p><button className="primary full" onClick={draw}>Draw again</button></div>}{winner==="p1"&&<div className="opening-result" role="status"><strong>{s.p1} wins the high-card draw!</strong><p>Choose whether to receive now or kick and receive to start the second half.</p><div className="choices"><button onClick={()=>choose("receive")}><strong>Receive</strong><small>Start the game on offense</small></button><button onClick={()=>choose("kick")}><strong>Kick</strong><small>{s.p2} starts on offense</small></button></div></div>}{winner==="p2"&&s.openingChoice&&<div className="opening-result" role="status"><strong>{s.p2} wins the high-card draw.</strong><p>{s.p2} chooses to <b>{s.openingChoice}</b>{s.openingChoice==="receive"?" and will start on offense.":` — ${s.p1} will start on offense.`}</p><button className="primary full" onClick={()=>choose(s.openingChoice!)}>Start game</button></div>}</section>}
 function Scoreboard({s,quarter}:{s:Session;quarter:string}){return <section className="scoreboard">{(["p1","p2"] as Team[]).map((t,i)=><div key={t} className={`score-cell score-${t}`} style={{order:i===0?0:2}}><p>{s[t]}</p><strong>{s.scores[t]}</strong><small className={s.offense===t?"on-offense":""}>{s.offense===t?"▶ OFFENSE":"DEFENSE"}</small></div>)}<div className="score-meta"><strong>{quarter}</strong><small>{s.overtime?"SUDDEN DEATH":`POSS ${s.possessionNum}/8`}</small></div></section>}
-function StatsSnapshot({title,p1Name,p2Name,stats}:{title:string;p1Name:string;p2Name:string;stats:Record<Team,PlayerGameStats>}){const fg=(s:PlayerGameStats)=>{const made=s.fieldGoals.filter(x=>x.made).length,missed=s.fieldGoals.length-made;return `${made} made · ${missed} missed${s.fieldGoals.length?` · ${s.fieldGoals.map(x=>`${x.made?"✓":"✕"}${x.distance} yd`).join(", ")}`:""}`};const two=(s:PlayerGameStats)=>`${s.twoPointMade} made · ${s.twoPointMissed} failed`;const rows:[string,(s:PlayerGameStats)=>React.ReactNode][]=[["Total yards",s=>s.runYards+s.passYards],["Pass yards",s=>s.passYards],["Run yards",s=>s.runYards],["Turnovers",s=>s.turnovers],["Field goals",fg],["2-point conversions",two],["Onside recoveries",s=>s.onsideRecoveries],["Points",s=>s.points]];return <section className="stats-snapshot"><h3>{title}</h3><div className="stats-grid"><div className="stats-head"><span>Stat</span><strong>{p1Name}</strong><strong>{p2Name}</strong></div>{rows.map(([label,format])=><div className="stats-row" key={label}><span>{label}</span><b>{format(stats.p1)}</b><b>{format(stats.p2)}</b></div>)}</div><p className="stats-key">✓ and ✕ identify each field-goal result and attempt distance.</p></section>}
+function StatsSnapshot({title,p1Name,p2Name,stats}:{title:string;p1Name:string;p2Name:string;stats:Record<Team,PlayerGameStats>}){const fg=(s:PlayerGameStats)=>{const made=s.fieldGoals.filter(x=>x.made).length,missed=s.fieldGoals.length-made;return `${made} made · ${missed} missed${s.fieldGoals.length?` · ${s.fieldGoals.map(x=>`${x.made?"✓":"✕"}${x.distance} yd`).join(", ")}`:""}`};const xp=(s:PlayerGameStats)=>`${s.extraPointMade??0} made · ${s.extraPointMissed??0} missed`;const two=(s:PlayerGameStats)=>`${s.twoPointMade} made · ${s.twoPointMissed} failed`;const rows:[string,(s:PlayerGameStats)=>React.ReactNode][]=[["Total yards",s=>s.runYards+s.passYards],["Pass yards",s=>s.passYards],["Run yards",s=>s.runYards],["Turnovers",s=>s.turnovers],["Field goals",fg],["Extra points",xp],["2-point conversions",two],["Onside recoveries",s=>s.onsideRecoveries],["Points",s=>s.points]];return <section className="stats-snapshot"><h3>{title}</h3><div className="stats-grid"><div className="stats-head"><span>Stat</span><strong>{p1Name}</strong><strong>{p2Name}</strong></div>{rows.map(([label,format])=><div className="stats-row" key={label}><span>{label}</span><b>{format(stats.p1)}</b><b>{format(stats.p2)}</b></div>)}</div><p className="stats-key">✓ and ✕ identify each field-goal result and attempt distance.</p></section>}
 function Field({s}:{s:Session}){return <section className="field-wrap"><div className="field" aria-label={`Ball on ${displaySpot(s.ballPos)}`}><div className="end-zone end-zone-own">OWN</div><div className="end-zone end-zone-opponent">END ZONE</div>{[10,20,30,40,50,60,70,80,90].map((n)=><div className="yard" style={{left:`${fieldPercent(n)}%`}} key={n}><span>{Math.min(n,100-n)}</span></div>)}<div className="first-line" style={{left:`${fieldPercent(s.lineToGain)}%`}}/><div className={`football ball-${s.offense}`} style={{left:`${fieldPercent(s.ballPos)}%`}}><i/></div></div><div className="field-caption"><span>◀ own goal</span><span>Ball on the <b>{displaySpot(s.ballPos)}</b> · {100-s.ballPos} to the end zone</span><span>end zone ▶</span></div></section>}
 function PlayingCard({card,size="hand",selected=false,onClick,accentColor}:{card:VirtualCard;size?:"hand"|"reveal"|"draw";selected?:boolean;onClick?:()=>void;accentColor?:string}){const content=<><span className="card-corner top">{card.rank}{card.suit}</span><strong>{card.rank}{card.suit}</strong><span className="card-corner bottom">{card.rank}{card.suit}</span></>;return onClick?<button aria-label={`${card.rank} of ${card.suit}`} onClick={onClick} className={`playing-card ${size} ${card.color} ${selected?"selected":""}`} style={{"--card-accent":accentColor} as React.CSSProperties}>{content}</button>:<div aria-label={`${card.rank} of ${card.suit}`} className={`playing-card ${size} ${card.color}`}>{content}</div>}
 function CpuThinking({name,detail="Considering the public game state…"}:{name:string;detail?:string}){return <section className="card cpu-thinking" role="status" aria-live="polite"><Eyebrow>CPU opponent</Eyebrow><h2>{name} is choosing…</h2><p className="helper">{detail}</p></section>}
@@ -479,7 +500,7 @@ function RulesContent(){return <div className="rules-content"><ol className="rul
   <li><strong>Score.</strong> Touchdown = 6, extra point = 1 (draw a rank: 4 or higher is good; 2 or 3 misses), two-point try = 2 (one normal play from the 2), field goal = 3, safety = 2.</li>
   <li><strong>Continue play.</strong> After scoring, you may try an onside kick unless it is the last possession of a half or overtime. Draw K/A to recover at midfield; otherwise the opponent starts there.</li>
   <li><strong>Finish the game.</strong> Play eight possessions—two per quarter. The team that did not open the first half opens the second. If tied, alternate possessions from each team&apos;s own 20 until one team leads after both have possessed the ball.</li>
-</ol><section className="cpu-rules"><h3>Playing a CPU opponent</h3><p>Choose <strong>Virtual deck</strong>, then <strong>CPU opponent</strong>. You are always Player 1; the CPU is Player 2.</p><ul><li>The CPU plays offense and defense, makes fourth-down, conversion, kickoff, and overtime decisions, and uses the same deck rules as a human.</li><li>CPU opponents cannot see your hand, your selected card, or upcoming cards. Stronger opponents make better use of public information such as the score, field position, cards already played, and your prior Run/Pass tendency.</li><li>Rookie Riley is easiest; Coach Morgan, Captain Harper, and The Commissioner increase in challenge. You can undo the most recently applied play just as in other virtual-deck games.</li></ul></section></div>}
+</ol><section className="cpu-rules"><h3>Playing a CPU opponent</h3><p>Choose <strong>Virtual deck</strong>, then <strong>CPU opponent</strong>. You are always Player 1; the CPU is Player 2.</p><ul><li>At kickoff, both participants draw a temporary high card. The winner chooses Receive or Kick; tied ranks draw again. All opening cards are returned before fresh gameplay hands are dealt.</li><li>The CPU plays offense and defense, makes fourth-down, conversion, kickoff, and overtime decisions, and uses the same deck rules as a human.</li><li>CPU opponents cannot see your hand, your selected card, or upcoming cards. Stronger opponents make better use of public information such as the score, field position, cards already played, and your prior Run/Pass tendency.</li><li>Rookie Riley is easiest; Coach Morgan, Captain Harper, and The Commissioner increase in challenge. You can undo the most recently applied play just as in other virtual-deck games.</li></ul></section></div>}
 function RulesPage(){return <section className="card rules-page"><Eyebrow>Quick guide</Eyebrow><h2>How to play</h2><p className="helper">Everything needed to start playing, in order.</p><RulesContent /></section>}
 function RulesOverlay({onClose}:{onClose:()=>void}){return <div className="rules-overlay" role="dialog" aria-modal="true" aria-labelledby="rules-title"><section className="rules-modal"><button className="rules-close" aria-label="Close rules" onClick={onClose}>×</button><Eyebrow>Quick guide</Eyebrow><h2 id="rules-title">How to play</h2><RulesContent /></section></div>}
 const HISTORY_SORTS=[
@@ -501,7 +522,7 @@ function History({players,games,onNew}:{players:PlayerProfile[];games:GameResult
   const [sort,setSort]=useState("newest:desc"),[filter,setFilter]=useState("all"),[expanded,setExpanded]=useState<string|null>(null);
   const filtered=useMemo(()=>filterGameResults(games,filter),[games,filter]);
   const recent=useMemo(()=>sortGameResults(filtered,sort),[filtered,sort]);
-  const cpuRecords=useMemo(()=>CPU_PROFILES.map(cpu=>{const played=games.filter(game=>game.cpuId===cpu.id),wins=played.filter(game=>game.p1Score>game.p2Score).length;return {...cpu,played:played.length,wins,losses:played.length-wins}}).filter(row=>row.played),[games]);
+  const cpuRecords=useMemo(()=>CPU_PROFILES.map(cpu=>({...cpu,...cpuMatchupRecord(games,cpu.id)})).filter(row=>row.played),[games]);
   const highestDefeated=useMemo(()=>[...games].filter(game=>isCpuGame(game)&&game.p1Score>game.p2Score).sort((a,b)=>(b.cpuStars??0)-(a.cpuStars??0))[0],[games]);
   if(!games.length)return <section className="card empty-history"><Eyebrow>Game History</Eyebrow><h2>Past games &amp; records</h2><p>No games recorded yet. Play a game and choose to save the result to start building history.</p><button className="primary" onClick={onNew}>New Game</button></section>;
   /* superseded compact renderer retained below for migration context
@@ -516,7 +537,7 @@ function HistoryV2({players,games,onNew}:{players:PlayerProfile[];games:GameResu
   const [filter,setFilter]=useState("all");
   const [expanded,setExpanded]=useState<string|null>(null);
   const recent=useMemo(()=>sortGameResults(filterGameResults(games,filter),sort),[games,filter,sort]);
-  const cpuRecords=useMemo(()=>CPU_PROFILES.map(cpu=>{const played=games.filter(game=>game.cpuId===cpu.id),wins=played.filter(game=>game.p1Score>game.p2Score).length;return {...cpu,played:played.length,wins,losses:played.length-wins}}).filter(row=>row.played),[games]);
+  const cpuRecords=useMemo(()=>CPU_PROFILES.map(cpu=>({...cpu,...cpuMatchupRecord(games,cpu.id)})).filter(row=>row.played),[games]);
   const highestDefeated=useMemo(()=>[...games].filter(game=>isCpuGame(game)&&game.p1Score>game.p2Score).sort((a,b)=>(b.cpuStars??0)-(a.cpuStars??0))[0],[games]);
   if(!games.length)return <section className="card empty-history"><Eyebrow>Game History</Eyebrow><h2>Past games &amp; records</h2><p>No games recorded yet. Play a game and choose to save the result to start building history.</p><button className="primary" onClick={onNew}>New Game</button></section>;
   return <section className="card history">

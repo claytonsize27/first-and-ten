@@ -101,6 +101,21 @@ export function ordinal(n: number) {
   return (["", "1ST", "2ND", "3RD", "4TH"] as const)[n] ?? `${n}TH`;
 }
 
+export function downDistanceLabel(down: number, ballPos: number, lineToGain: number, twoPoint = false) {
+  if (twoPoint) return "Two-point try · 2 yards";
+  const label = (["", "1st", "2nd", "3rd", "4th"] as const)[down] ?? `${down}th`;
+  if (lineToGain >= 100) return `${label} and Goal`;
+  return `${label} and ${Math.max(1, lineToGain - ballPos)}`;
+}
+
+export function compareOpeningCards(human: VirtualCard, cpu: VirtualCard) {
+  return Math.sign(RANKS.indexOf(human.rank) - RANKS.indexOf(cpu.rank));
+}
+
+export function openingReceiverForChoice(winner: "p1" | "p2", choice: "receive" | "kick") {
+  return choice === "receive" ? winner : winner === "p1" ? "p2" : "p1";
+}
+
 export function yd(n: number) {
   return `${n} ${n === 1 ? "yard" : "yards"}`;
 }
@@ -124,12 +139,16 @@ export type FieldGoalAttempt = { distance: number; made: boolean };
 export type PlayerGameStats = {
   runYards: number; passYards: number; turnovers: number;
   fieldGoals: FieldGoalAttempt[]; twoPointMade: number; twoPointMissed: number;
-  onsideRecoveries: number; points: number;
+  extraPointMade: number; extraPointMissed: number; onsideRecoveries: number; points: number;
 };
 export const emptyPlayerGameStats = (points = 0): PlayerGameStats => ({
   runYards: 0, passYards: 0, turnovers: 0, fieldGoals: [],
-  twoPointMade: 0, twoPointMissed: 0, onsideRecoveries: 0, points,
+  twoPointMade: 0, twoPointMissed: 0, extraPointMade: 0, extraPointMissed: 0, onsideRecoveries: 0, points,
 });
+export function recordExtraPointResult(stats: PlayerGameStats, made: boolean) {
+  if (made) stats.extraPointMade = (Number.isFinite(stats.extraPointMade) ? stats.extraPointMade : 0) + 1;
+  else stats.extraPointMissed = (Number.isFinite(stats.extraPointMissed) ? stats.extraPointMissed : 0) + 1;
+}
 export type GameResult = {
   id: string; playedAt: number; p1PlayerId: string; p2PlayerId: string;
   p1Name: string; p2Name: string; p1Score: number; p2Score: number;
@@ -152,7 +171,21 @@ export function filterGameResults(games: GameResult[], filter = "all") {
 
 export function gamePlayerStats(game: GameResult, team: "p1" | "p2") {
   const saved = game.stats?.[team];
-  return saved ? { ...emptyPlayerGameStats(game[`${team}Score`]), ...saved, fieldGoals: Array.isArray(saved.fieldGoals) ? saved.fieldGoals : [] } : emptyPlayerGameStats(game[`${team}Score`]);
+  return saved ? { ...emptyPlayerGameStats(game[`${team}Score`]), ...saved, fieldGoals: Array.isArray(saved.fieldGoals) ? saved.fieldGoals : [], extraPointMade: Number.isFinite(saved.extraPointMade) ? saved.extraPointMade : 0, extraPointMissed: Number.isFinite(saved.extraPointMissed) ? saved.extraPointMissed : 0 } : emptyPlayerGameStats(game[`${team}Score`]);
+}
+
+export function cpuMatchupRecord(games: GameResult[], cpuId: string) {
+  const matching = games.filter((game) => isCpuGame(game) && (game.cpuId ?? game.p2PlayerId) === cpuId);
+  let wins = 0, losses = 0;
+  for (const game of matching) {
+    if (game.p1Score === game.p2Score) continue;
+    const cpuPlayerId = game.cpuId ?? game.p2PlayerId;
+    if (game.winnerPlayerId && game.winnerPlayerId === cpuPlayerId) wins += 1;
+    else if (game.winnerPlayerId && game.p1PlayerId && game.winnerPlayerId === game.p1PlayerId) losses += 1;
+    else if (game.p2Score > game.p1Score) wins += 1;
+    else if (game.p1Score > game.p2Score) losses += 1;
+  }
+  return { played: matching.length, wins, losses };
 }
 
 export function gameSortMetric(game: GameResult, metric: string) {

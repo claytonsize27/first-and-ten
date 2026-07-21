@@ -140,3 +140,8 @@ export function chooseCpuKickoff(cpuId: CpuId, situation: CpuSituation): "deep" 
   const threshold = cpuId === "cpu_rookie_riley" ? 7 : 6;
   return trailing && situation.possessionNum >= threshold ? "onside" : "deep";
 }
+
+export function chooseCpuOpeningChoice(cpuId: CpuId, decisionSeed: number): "receive" | "kick" {
+  const kickRate = cpuId === "cpu_rookie_riley" ? .15 : cpuId === "cpu_coach_morgan" ? .08 : cpuId === "cpu_captain_harper" ? .03 : 0;
+  return hashUnit(decisionSeed, 0, `${cpuId}:opening`) < kickRate ? "kick" : "receive";
+}

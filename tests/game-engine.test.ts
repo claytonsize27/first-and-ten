@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { buildVirtualDeck, cardStr, dealVirtualDeck, drawOneVirtual, emptyPlayerGameStats, extraPointGood, fieldGoalGood, fgMinRank, fieldPercent, filterGameResults, fumbleStart, gamePlayerStats, gameSortMetric, interceptionStart, isCpuGame, playerStats, puntDistance, resolveMatch, sortGameResults, valueOf } from "../app/game-engine.ts";
-import { CPU_PROFILES, chooseCpuCard, chooseCpuConversion, chooseCpuFourthDown, chooseCpuKickoff, getCpuProfile, type CpuCardContext } from "../app/cpu-engine.ts";
+import { buildVirtualDeck, cardStr, compareOpeningCards, cpuMatchupRecord, dealVirtualDeck, downDistanceLabel, drawOneVirtual, emptyPlayerGameStats, extraPointGood, fieldGoalGood, fgMinRank, fieldPercent, filterGameResults, fumbleStart, gamePlayerStats, gameSortMetric, interceptionStart, isCpuGame, openingReceiverForChoice, playerStats, puntDistance, recordExtraPointResult, resolveMatch, sortGameResults, valueOf } from "../app/game-engine.ts";
+import { CPU_PROFILES, chooseCpuCard, chooseCpuConversion, chooseCpuFourthDown, chooseCpuKickoff, chooseCpuOpeningChoice, getCpuProfile, type CpuCardContext } from "../app/cpu-engine.ts";
 
 test("resolution chart and card values", () => {
   assert.equal(resolveMatch({color:"black",rank:"5"},{color:"black",rank:"8"}).gain, 0);
@@ -134,4 +134,56 @@ test("history identifies and filters CPU games while preserving legacy human gam
   assert.deepEqual(filterGameResults([human,cpu],"human").map(game=>game.id),["human"]);
   assert.deepEqual(filterGameResults([human,cpu],"cpu").map(game=>game.id),["cpu"]);
   assert.deepEqual(filterGameResults([human,cpu],"cpu_rookie_riley").map(game=>game.id),["cpu"]);
+});
+
+test("down-and-distance labels derive from authoritative field state", () => {
+  assert.equal(downDistanceLabel(1,20,30),"1st and 10");
+  assert.equal(downDistanceLabel(2,24,30),"2nd and 6");
+  assert.equal(downDistanceLabel(3,19,30),"3rd and 11");
+  assert.equal(downDistanceLabel(4,16,30),"4th and 14");
+  assert.equal(downDistanceLabel(1,94,100),"1st and Goal");
+  assert.equal(downDistanceLabel(1,98,100,true),"Two-point try · 2 yards");
+});
+
+test("opening high-card comparison uses rank order, ignores suit, and keeps gameplay deal fresh", () => {
+  const deck=buildVirtualDeck(),card=(rank:string,suit:string)=>deck.find(item=>item.rank===rank&&item.suit===suit)!;
+  assert.equal(compareOpeningCards(card("J","♠"),card("Q","♥")),-1);
+  assert.equal(compareOpeningCards(card("Q","♣"),card("K","♦")),-1);
+  assert.equal(compareOpeningCards(card("A","♠"),card("K","♥")),1);
+  assert.equal(compareOpeningCards(card("8","♠"),card("8","♦")),0);
+  assert.equal(openingReceiverForChoice("p1","receive"),"p1");assert.equal(openingReceiverForChoice("p1","kick"),"p2");
+  assert.equal(openingReceiverForChoice("p2","receive"),"p2");assert.equal(openingReceiverForChoice("p2","kick"),"p1");
+  const gameplay=dealVirtualDeck(()=>.42);
+  assert.equal(gameplay.p1Hand.length,5);assert.equal(gameplay.p2Hand.length,5);assert.equal(gameplay.drawPile.length,42);assert.equal(gameplay.discardPile.length,0);
+  assert.equal(new Set([...gameplay.p1Hand,...gameplay.p2Hand,...gameplay.drawPile].map(item=>item.id)).size,52);
+});
+
+test("CPU opening choice prefers receiving but supports a deterministic personality kick", () => {
+  assert.equal(chooseCpuOpeningChoice("cpu_commissioner",123),"receive");
+  const rookieChoices=new Set(Array.from({length:500},(_,seed)=>chooseCpuOpeningChoice("cpu_rookie_riley",seed)));
+  assert.deepEqual([...rookieChoices].sort(),["kick","receive"]);
+});
+
+test("extra-point stats initialize and legacy saved values are safely normalized", () => {
+  assert.equal(emptyPlayerGameStats().extraPointMade,0);assert.equal(emptyPlayerGameStats().extraPointMissed,0);
+  const human=emptyPlayerGameStats(),cpu=emptyPlayerGameStats();recordExtraPointResult(human,true);recordExtraPointResult(human,false);recordExtraPointResult(cpu,false);recordExtraPointResult(cpu,false);
+  assert.deepEqual([human.extraPointMade,human.extraPointMissed,cpu.extraPointMade,cpu.extraPointMissed],[1,1,0,2]);assert.deepEqual([human.twoPointMade,human.twoPointMissed],[0,0]);
+  const base={id:"xp",playedAt:1,p1PlayerId:"a",p2PlayerId:"b",p1Name:"A",p2Name:"B",p1Score:7,p2Score:6,winnerPlayerId:"a",overtime:false,finalPossessionNum:8};
+  const legacy={...base,stats:{p1:{...emptyPlayerGameStats(7),extraPointMade:undefined as unknown as number,extraPointMissed:NaN},p2:{...emptyPlayerGameStats(6)}}};
+  assert.equal(gamePlayerStats(legacy,"p1").extraPointMade,0);assert.equal(gamePlayerStats(legacy,"p1").extraPointMissed,0);
+  const saved={...base,stats:{p1:{...emptyPlayerGameStats(7),extraPointMade:1,extraPointMissed:2},p2:emptyPlayerGameStats(6)}};
+  assert.deepEqual([gamePlayerStats(saved,"p1").extraPointMade,gamePlayerStats(saved,"p1").extraPointMissed],[1,2]);
+});
+
+test("CPU matchup records are calculated from the named CPU perspective", () => {
+  const base={playedAt:1,p1PlayerId:"human",p2PlayerId:"cpu_commissioner",p1Name:"Human",p2Name:"The Commissioner",overtime:false,finalPossessionNum:8,opponentType:"cpu" as const,cpuId:"cpu_commissioner"};
+  const games=[
+    {...base,id:"cpu-win",p1Score:7,p2Score:14,winnerPlayerId:"cpu_commissioner"},
+    {...base,id:"human-win-1",p1Score:14,p2Score:7,winnerPlayerId:"human"},
+    {...base,id:"human-win-2",p1Score:10,p2Score:3,winnerPlayerId:"human"},
+    {...base,id:"human-win-3",p1Score:21,p2Score:20,winnerPlayerId:"human"},
+    {...base,id:"malformed-tie",p1Score:7,p2Score:7,winnerPlayerId:""},
+  ];
+  assert.deepEqual(cpuMatchupRecord(games,"cpu_commissioner"),{played:5,wins:1,losses:3});
+  assert.deepEqual(cpuMatchupRecord(games,"cpu_rookie_riley"),{played:0,wins:0,losses:0});
 });

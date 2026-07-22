@@ -213,9 +213,24 @@ export function mergeCloudStates(authoritative: { players: PlayerProfile[]; game
   return { players: mergeById(authoritative.players, pending.players), gameResults: mergeById(authoritative.gameResults, pending.gameResults) };
 }
 
+export function mergePersistedCollectionById(existing: unknown, incoming: Array<{ id: string }>): unknown[] {
+  const unkeyed: unknown[] = [], keyed = new Map<string, unknown>();
+  for (const item of incoming) keyed.set(item.id, item);
+  for (const item of Array.isArray(existing) ? existing : []) {
+    if (item && typeof item === "object" && typeof (item as { id?: unknown }).id === "string") {
+      // Firestore is authoritative for an ID it already contains. New IDs are
+      // appended, while stale local copies can never replace server records.
+      keyed.set((item as { id: string }).id, item);
+    } else unkeyed.push(item);
+  }
+  return [...unkeyed, ...keyed.values()];
+}
+
 export function recoverLegacyPendingState(authoritative: { players: PlayerProfile[]; gameResults: GameResult[] }, cached: { players: PlayerProfile[]; gameResults: GameResult[] }) {
   const cloudPlayerIds = new Set(authoritative.players.map((player) => player.id));
+  const cloudPlayerNames = new Set(authoritative.players.map((player) => player.name.trim().toLocaleLowerCase()));
   const sameAccountEvidence = cached.players.some((player) => cloudPlayerIds.has(player.id))
+    || cached.players.some((player) => cloudPlayerNames.has(player.name.trim().toLocaleLowerCase()))
     || cached.gameResults.some((game) => cloudPlayerIds.has(game.p1PlayerId) || cloudPlayerIds.has(game.p2PlayerId));
   if (!sameAccountEvidence) return null;
 

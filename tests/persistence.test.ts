@@ -3,7 +3,7 @@ import test from "node:test";
 import { CPU_PROFILES } from "../app/cpu-engine.ts";
 import { emptyPlayerGameStats, type GameResult } from "../app/game-engine.ts";
 import {
-  mergeCloudStates, normalizeCloudStateForRuntime, PersistenceValidationError, recoverLegacyPendingState, sanitizeFirestorePlainData,
+  mergeCloudStates, mergePersistedCollectionById, normalizeCloudStateForRuntime, PersistenceValidationError, recoverLegacyPendingState, sanitizeFirestorePlainData,
   toPersistedCloudState, toPersistedGameResult,
 } from "../app/persistence.ts";
 
@@ -116,6 +116,21 @@ test("legacy failed saves recover only missing IDs with same-account evidence", 
   assert.deepEqual(recovered?.gameResults.map((game) => game.id), ["game-1", "local-only"]);
   assert.equal(recovered?.gameResults[0].p1Score, 7, "authoritative copy must not be overwritten");
   assert.equal(recoverLegacyPendingState(cloud, { players: [{ id: "other", name: "Other", createdAt: 2 }], gameResults: [] }), null);
+});
+
+test("whole-document writes append new IDs without replacing authoritative records", () => {
+  const cloudCopy = currentGame({ id: "shared", p1Score: 7 });
+  const staleLocalCopy = currentGame({ id: "shared", p1Score: 99 });
+  const localOnly = currentGame({ id: "new", p1Score: 14 });
+  const merged = mergePersistedCollectionById([cloudCopy], [staleLocalCopy, localOnly]) as GameResult[];
+  assert.deepEqual(merged.map((game) => game.id), ["shared", "new"]);
+  assert.equal(merged.find((game) => game.id === "shared")?.p1Score, 7);
+});
+
+test("legacy recovery can recognize recreated profiles by normalized name without auto-writing", () => {
+  const cloud = { players: [{ id: "new-austin", name: "Austin", createdAt: 2 }], gameResults: [] };
+  const cached = { players: [{ id: "old-austin", name: " austin ", createdAt: 1 }], gameResults: [currentGame({ id: "old-game", p1PlayerId: "old-austin" })] };
+  assert.equal(recoverLegacyPendingState(cloud, cached)?.gameResults[0].id, "old-game");
 });
 
 test("cloud mapping removes nested undefined without losing valid records", () => {

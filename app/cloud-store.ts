@@ -1,10 +1,10 @@
 import { initializeApp } from "firebase/app";
 import { GoogleAuthProvider, User, getAuth, onAuthStateChanged, signInWithPopup, signOut } from "firebase/auth";
-import { doc, getFirestore, onSnapshot, serverTimestamp, setDoc } from "firebase/firestore";
+import { doc, getFirestore, onSnapshot, runTransaction, serverTimestamp } from "firebase/firestore";
 import type { GameResult, PlayerProfile } from "./game-engine";
 import { firebaseConfig } from "./firebase-config";
 import {
-  normalizeCloudStateForRuntime, PersistenceValidationError, toPersistedCloudState,
+  mergePersistedCollectionById, normalizeCloudStateForRuntime, PersistenceValidationError, toPersistedCloudState,
   type PersistedCloudState,
 } from "./persistence";
 
@@ -46,7 +46,16 @@ export function watchCloudState(userId: string, callback: (state: CloudState | n
 
 async function writePersistedCloudState(userId: string, state: PersistedCloudState) {
   if (!db) throw new Error("Cloud sync is not configured yet.");
-  await setDoc(doc(db, "users", userId), { ...state, updatedAt: serverTimestamp() });
+  const userRef = doc(db, "users", userId);
+  await runTransaction(db, async (transaction) => {
+    const snapshot = await transaction.get(userRef);
+    const existing = snapshot.exists() ? snapshot.data() : {};
+    transaction.set(userRef, {
+      players: mergePersistedCollectionById(existing.players, state.players),
+      gameResults: mergePersistedCollectionById(existing.gameResults, state.gameResults),
+      updatedAt: serverTimestamp(),
+    });
+  });
 }
 
 export async function saveCloudState(userId: string, state: CloudState) {

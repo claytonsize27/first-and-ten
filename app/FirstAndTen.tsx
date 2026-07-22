@@ -12,6 +12,7 @@ import {
 } from "./cpu-engine";
 import type { User } from "firebase/auth";
 import { cloudConfigured, saveCloudState, signInToCloud, signOutOfCloud, watchAuth, watchCloudState } from "./cloud-store";
+import { mergeCloudStates, normalizeCloudStateForRuntime, PersistenceValidationError, toPersistedGameResult } from "./persistence";
 
 type Team = "p1" | "p2";
 type Phase = "home" | "deckMode" | "names" | "openingDraw" | "possession" | "play" | "pat" | "onsideChoice" | "suddenDeathStart" | "gameOver" | "rules" | "history";
@@ -52,13 +53,35 @@ const initial = (phase: Phase = "home"): Session => ({
 });
 const other = (team: Team): Team => team === "p1" ? "p2" : "p1";
 const uid = () => globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+const readCachedState = () => {
+  try {
+    return normalizeCloudStateForRuntime({
+      players: JSON.parse(localStorage.getItem("first-ten-players") || "[]"),
+      gameResults: JSON.parse(localStorage.getItem("first-ten-results") || "[]"),
+    }).state;
+  } catch { return { players: [] as PlayerProfile[], gameResults: [] as GameResult[] }; }
+};
+const readPendingSync = (userId: string) => {
+  try {
+    const saved = JSON.parse(localStorage.getItem("first-ten-pending-sync") || "null");
+    return saved?.userId === userId ? normalizeCloudStateForRuntime(saved.state).state : null;
+  } catch { return null; }
+};
+const cachePendingSync = (userId: string, state: { players: PlayerProfile[]; gameResults: GameResult[] }) => {
+  try { localStorage.setItem("first-ten-pending-sync", JSON.stringify({ userId, state })); } catch { /* cache is optional */ }
+};
+const clearPendingSync = (userId: string) => {
+  try {
+    const saved = JSON.parse(localStorage.getItem("first-ten-pending-sync") || "null");
+    if (saved?.userId === userId) localStorage.removeItem("first-ten-pending-sync");
+  } catch { /* cache is optional */ }
+};
 
 export default function FirstAndTen() {
   const [session, setSession] = useState<Session>(() => initial());
   const [undoStack, setUndoStack] = useState<Session[]>([]);
-  const readCache = <T,>(key: string): T[] => { try { const value = JSON.parse(localStorage.getItem(key) || "[]"); return Array.isArray(value) ? value : []; } catch { return []; } };
-  const [players, setPlayers] = useState<PlayerProfile[]>(() => readCache<PlayerProfile>("first-ten-players"));
-  const [games, setGames] = useState<GameResult[]>(() => readCache<GameResult>("first-ten-results"));
+  const [players, setPlayers] = useState<PlayerProfile[]>(() => readCachedState().players);
+  const [games, setGames] = useState<GameResult[]>(() => readCachedState().gameResults);
   const [selected, setSelected] = useState<Record<Team, string>>({ p1: "", p2: "" });
   const [newNames, setNewNames] = useState<Record<Team, string>>({ p1: "", p2: "" });
   const [offCard, setOffCard] = useState<Partial<Card>>({});
@@ -69,33 +92,69 @@ export default function FirstAndTen() {
   const [authReady, setAuthReady] = useState(false);
   const [cloudReady, setCloudReady] = useState(false);
   const [cloudError, setCloudError] = useState("");
+  const [cloudErrorKind, setCloudErrorKind] = useState<"read" | "write" | null>(null);
+  const [cloudStatus, setCloudStatus] = useState<"idle" | "saving" | "synced" | "error">("idle");
   const [guestMode, setGuestMode] = useState(false);
   const [showRules, setShowRules] = useState(false);
   const [selectedVirtualCard, setSelectedVirtualCard] = useState("");
   const [openingReceiver, setOpeningReceiver] = useState<Team | null>(null);
   const openingDrawLock = useRef(false);
+  const pendingCloudState = useRef<{ players: PlayerProfile[]; gameResults: GameResult[] } | null>(null);
+  const authoritativeCloudState = useRef<{ players: PlayerProfile[]; gameResults: GameResult[] } | null>(null);
+  const cloudWriteSequence = useRef(0);
+  const gameSaveLock = useRef(false);
   const [player2Kind, setPlayer2Kind] = useState<"human" | "cpu">("human");
   const [selectedCpuId, setSelectedCpuId] = useState<CpuId | null>(null);
   useEffect(() => { if (session.phase === "gameOver") (document.querySelector(".final h2") as HTMLElement | null)?.focus(); }, [session.phase]);
 
+  const performCloudWrite = (user: User, state: { players: PlayerProfile[]; gameResults: GameResult[] }) => {
+    const sequence = ++cloudWriteSequence.current;
+    pendingCloudState.current = state;
+    cachePendingSync(user.uid, state);
+    setCloudStatus("saving"); setCloudError(""); setCloudErrorKind(null);
+    return saveCloudState(user.uid, state).then(() => {
+      if (sequence !== cloudWriteSequence.current) return;
+      pendingCloudState.current = null;
+      clearPendingSync(user.uid);
+      setCloudStatus("synced"); setCloudError(""); setCloudErrorKind(null);
+    }).catch((error: unknown) => {
+      if (sequence !== cloudWriteSequence.current) return;
+      setCloudStatus("error"); setCloudErrorKind("write");
+      setCloudError(error instanceof PersistenceValidationError
+        ? "We couldn't sync this update because some saved data was invalid. Your existing cloud history was not changed."
+        : "We couldn't sync your latest changes. They remain on this device. Try again when your connection is available.");
+    });
+  };
+
   useEffect(() => {
     let stopCloud: () => void = () => undefined;
     const stopAuth = watchAuth((user) => {
-      stopCloud(); setCloudUser(user); setAuthReady(true); setCloudError("");
+      stopCloud(); setCloudUser(user); setAuthReady(true); setCloudError(""); setCloudErrorKind(null); setCloudStatus("idle");
+      pendingCloudState.current = user ? readPendingSync(user.uid) : null; authoritativeCloudState.current = null; cloudWriteSequence.current += 1;
       if (!user) { setCloudReady(false); return; }
       setGuestMode(false);
       setCloudReady(false);
       stopCloud = watchCloudState(user.uid, (data) => {
         if (data) {
-          setPlayers(data.players); setGames(data.gameResults);
-          try { localStorage.setItem("first-ten-players", JSON.stringify(data.players)); localStorage.setItem("first-ten-results", JSON.stringify(data.gameResults)); } catch { /* cache is optional */ }
+          authoritativeCloudState.current = data;
+          const visible = pendingCloudState.current ? mergeCloudStates(data, pendingCloudState.current) : data;
+          setPlayers(visible.players); setGames(visible.gameResults);
+          try { localStorage.setItem("first-ten-players", JSON.stringify(visible.players)); localStorage.setItem("first-ten-results", JSON.stringify(visible.gameResults)); } catch { /* cache is optional */ }
+          if (!pendingCloudState.current) setCloudStatus("synced");
+          else {
+            setCloudStatus("error"); setCloudErrorKind("write");
+            setCloudError("We couldn't sync your latest changes. They remain on this device. Try again when your connection is available.");
+          }
           setCloudReady(true);
         } else {
-          const cachedPlayers = readCache<PlayerProfile>("first-ten-players");
-          const cachedGames = readCache<GameResult>("first-ten-results");
-          void saveCloudState(user.uid, { players: cachedPlayers, gameResults: cachedGames }).then(() => setCloudReady(true)).catch((error: Error) => setCloudError(error.message));
+          const cached = pendingCloudState.current ?? readCachedState();
+          void performCloudWrite(user, cached).finally(() => setCloudReady(true));
         }
-      }, (error) => { setCloudError(error.message); setCloudReady(true); });
+      }, () => {
+        setCloudStatus("error"); setCloudErrorKind("read");
+        setCloudError("We couldn't load your cloud history. Your saved data on this device is still available.");
+        setCloudReady(true);
+      });
     });
     return () => { stopCloud(); stopAuth(); };
   }, []);
@@ -109,7 +168,15 @@ export default function FirstAndTen() {
   const persistCollections = (nextPlayers: PlayerProfile[], nextGames: GameResult[]) => {
     if (!cloudUser) return;
     try { localStorage.setItem("first-ten-players", JSON.stringify(nextPlayers)); localStorage.setItem("first-ten-results", JSON.stringify(nextGames)); } catch { /* cache is optional */ }
-    void saveCloudState(cloudUser.uid, { players: nextPlayers, gameResults: nextGames }).catch((error: Error) => setCloudError(error.message));
+    void performCloudWrite(cloudUser, { players: nextPlayers, gameResults: nextGames });
+  };
+  const retryCloudWrite = () => {
+    if (!cloudUser || !pendingCloudState.current) return;
+    const retryState = authoritativeCloudState.current
+      ? mergeCloudStates(authoritativeCloudState.current, pendingCloudState.current)
+      : pendingCloudState.current;
+    setPlayers(retryState.players); setGames(retryState.gameResults);
+    void performCloudWrite(cloudUser, retryState);
   };
   const nameOf = (t: Team, s = session) => s[t] || (t === "p1" ? "Player 1" : "Player 2");
   const accent = (t: Team) => t === "p1" ? "var(--p1)" : "var(--p2)";
@@ -309,7 +376,7 @@ export default function FirstAndTen() {
     const profile = { id: uid(), name, createdAt: Date.now() }; const updated = [...players, profile];
     setPlayers(updated); persistCollections(updated, games); setSelected((v) => ({ ...v, [team]: profile.id })); setNewNames((v) => ({ ...v, [team]: "" }));
   };
-  const resetSetup = (phase: Phase = "deckMode") => { setSession(initial(phase)); setUndoStack([]); setSelected({ p1: "", p2: "" }); setSelectedVirtualCard(""); setOpeningReceiver(null); setPlayer2Kind("human"); setSelectedCpuId(null); clearInputs(); };
+  const resetSetup = (phase: Phase = "deckMode") => { gameSaveLock.current = false; setSession(initial(phase)); setUndoStack([]); setSelected({ p1: "", p2: "" }); setSelectedVirtualCard(""); setOpeningReceiver(null); setPlayer2Kind("human"); setSelectedCpuId(null); clearInputs(); };
   const navigate = (phase: Phase) => { if (phase === "deckMode") resetSetup("deckMode"); else { setSession((s) => ({ ...s, phase })); if (phase === "home" || phase === "rules" || phase === "history") setSelected({ p1: "", p2: "" }); } };
   const chooseDeckMode = (gameMode: Exclude<GameMode,null>) => { setPlayer2Kind("human"); setSelectedCpuId(null); setSession((s) => ({ ...s, gameMode, cpuId: null, phase: "names" })); };
   const choosePlayer2Kind = (kind: "human" | "cpu") => { setPlayer2Kind(kind); if (kind === "cpu") setSelected((value) => ({ ...value, p2: "" })); else setSelectedCpuId(null); };
@@ -408,12 +475,30 @@ export default function FirstAndTen() {
     if(cpuOwnsDraw) drawVirtualSubCard();
   },[session.gameMode,session.cpuId,session.subMode,session.pendingSubDrawCard,session.offense,session.scoringTeam]);
   const saveDecision = (save: boolean) => {
-    if (session.resultSaved !== null) return;
+    if (session.resultSaved !== null || gameSaveLock.current) return;
+    gameSaveLock.current = true;
     if (save) {
       const winner: Team = session.scores.p1 > session.scores.p2 ? "p1" : "p2";
       const cpu = getCpuProfile(session.cpuId);
       const mercy = session.mercyResult;
-      const result: GameResult = { id: uid(), playedAt: Date.now(), p1PlayerId: session.p1PlayerId, p2PlayerId: session.p2PlayerId, p1Name: session.p1, p2Name: session.p2, p1Score: session.scores.p1, p2Score: session.scores.p2, winnerPlayerId: session[`${winner}PlayerId`], overtime: session.overtime, finalPossessionNum: session.possessionNum, stats: structuredClone(session.stats), gameMode: session.gameMode ?? undefined, opponentType: cpu ? "cpu" : "human", cpuId: cpu?.id, cpuName: cpu?.name, cpuDifficulty: cpu?.difficulty, cpuStars: cpu?.stars, mercyRuleEnabled: session.mercyRuleEnabled, endReason: session.endReason ?? (session.overtime ? "overtime" : "regulation"), mercyAtPossession: mercy?.shouldEnd ? session.possessionNum : undefined, mercyLeaderId: mercy?.leader ? session[`${mercy.leader}PlayerId`] : undefined, mercyTrailerId: mercy?.trailer ? session[`${mercy.trailer}PlayerId`] : undefined, mercyDeficit: mercy?.deficit, mercyRemainingPossessions: mercy?.remainingPossessions, mercyNextOffenseId: mercy?.nextOffense ? session[`${mercy.nextOffense}PlayerId`] : undefined, mercyMaximumComeback: mercy?.maximumComeback, mercyBestFinalDifferential: mercy?.bestFinalDifferential, mercyExplanation: session.mercyExplanation || undefined };
+      const baseResult: GameResult = {
+        id: uid(), playedAt: Date.now(), p1PlayerId: session.p1PlayerId, p2PlayerId: session.p2PlayerId,
+        p1Name: session.p1, p2Name: session.p2, p1Score: session.scores.p1, p2Score: session.scores.p2,
+        winnerPlayerId: session[`${winner}PlayerId`], overtime: session.overtime, finalPossessionNum: session.possessionNum,
+        stats: structuredClone(session.stats), gameMode: session.gameMode!, opponentType: cpu ? "cpu" : "human",
+        mercyRuleEnabled: session.mercyRuleEnabled, endReason: session.endReason ?? (session.overtime ? "overtime" : "regulation"),
+        ...(cpu ? { cpuId: cpu.id, cpuName: cpu.name, cpuDifficulty: cpu.difficulty, cpuStars: cpu.stars } : {}),
+        ...(mercy?.shouldEnd ? {
+          mercyAtPossession: session.possessionNum,
+          mercyLeaderId: mercy.leader ? session[`${mercy.leader}PlayerId`] : "",
+          mercyTrailerId: mercy.trailer ? session[`${mercy.trailer}PlayerId`] : "",
+          mercyDeficit: mercy.deficit, mercyRemainingPossessions: mercy.remainingPossessions,
+          ...(mercy.nextOffense ? { mercyNextOffenseId: session[`${mercy.nextOffense}PlayerId`] } : {}),
+          mercyMaximumComeback: mercy.maximumComeback, mercyBestFinalDifferential: mercy.bestFinalDifferential,
+          mercyExplanation: session.mercyExplanation,
+        } : {}),
+      };
+      const result = toPersistedGameResult(baseResult, { requireCurrent: true });
       const updated = [...games, result]; setGames(updated); persistCollections(players, updated);
     }
     setSession((s) => ({ ...s, resultSaved: save })); setUndoStack([]);
@@ -443,11 +528,11 @@ export default function FirstAndTen() {
 
   if (!cloudConfigured && !guestMode) return <main className="app"><Header /><section className="card cloud-gate"><Eyebrow>Local play</Eyebrow><h2>Cloud sync is unavailable</h2><p className="helper">You can still use the game tracker without saving profiles or results.</p><button className="secondary" onClick={continueAsGuest}>Continue without signing in</button></section></main>;
   if (!authReady || (cloudUser && !cloudReady)) return <main className="app"><Header /><section className="card cloud-gate"><p>Loading your shared field…</p></section></main>;
-  if (!cloudUser && !guestMode) return <main className="app"><Header /><section className="card cloud-gate"><Eyebrow>Choose how to play</Eyebrow><h2>Start a game</h2><p className="helper">Sign in to share profiles and game history across devices, or use the tracker without saving anything.</p><div className="gate-actions"><button className="primary" onClick={() => void signInToCloud().catch((error: Error) => setCloudError(error.message))}>Continue with Google</button><button className="secondary" onClick={continueAsGuest}>Continue without signing in</button></div>{cloudError && <p className="cloud-error" role="alert">{cloudError}</p>}</section></main>;
+  if (!cloudUser && !guestMode) return <main className="app"><Header /><section className="card cloud-gate"><Eyebrow>Choose how to play</Eyebrow><h2>Start a game</h2><p className="helper">Sign in to share profiles and game history across devices, or use the tracker without saving anything.</p><div className="gate-actions"><button className="primary" onClick={() => void signInToCloud().catch(() => setCloudError("Google sign-in could not be completed. Please try again."))}>Continue with Google</button><button className="secondary" onClick={continueAsGuest}>Continue without signing in</button></div>{cloudError && <p className="cloud-error" role="alert">{cloudError}</p>}</section></main>;
   return <main className="app">
     <Header onRules={gameActive ? () => setShowRules(true) : undefined} />
-    {!gameActive && <div className={`account-bar ${guestMode ? "guest" : ""}`}><span>{guestMode ? "Guest mode · profiles and history are off" : `● Cloud synced · ${cloudUser?.email || "Google account"}`}</span><button onClick={() => guestMode ? setGuestMode(false) : void signOutOfCloud()}>{guestMode ? "Sign in for cloud sync" : "Sign out"}</button></div>}
-    {cloudError && !gameActive && <p className="cloud-error" role="alert">Sync issue: {cloudError}</p>}
+    {!gameActive && <div className={`account-bar ${guestMode ? "guest" : ""}`}><span>{guestMode ? "Guest mode · profiles and history are off" : `● ${cloudStatus === "saving" ? "Saving to cloud" : cloudStatus === "error" ? "Cloud sync needs attention" : "Cloud synced"} · ${cloudUser?.email || "Google account"}`}</span><button onClick={() => guestMode ? setGuestMode(false) : void signOutOfCloud()}>{guestMode ? "Sign in for cloud sync" : "Sign out"}</button></div>}
+    {cloudError && !gameActive && <div className="cloud-error" role="alert"><span>{cloudError}</span>{cloudErrorKind === "write" && pendingCloudState.current && <button type="button" onClick={retryCloudWrite}>Try again</button>}</div>}
     {!gameActive && <nav className="tabs" aria-label="Primary">
       <button className={["home","deckMode","names","openingDraw","possession"].includes(session.phase) ? "active" : ""} onClick={() => navigate("deckMode")}>New Game</button>
       <button className={session.phase === "rules" ? "active" : ""} onClick={() => navigate("rules")}>Rules</button>

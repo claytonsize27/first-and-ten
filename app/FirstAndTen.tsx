@@ -12,7 +12,7 @@ import {
 } from "./cpu-engine";
 import type { User } from "firebase/auth";
 import { cloudConfigured, saveCloudState, signInToCloud, signOutOfCloud, watchAuth, watchCloudState } from "./cloud-store";
-import { mergeCloudStates, normalizeCloudStateForRuntime, PersistenceValidationError, toPersistedGameResult } from "./persistence";
+import { legacyImportDelta, mergeCloudStates, normalizeCloudStateForRuntime, PersistenceValidationError, toPersistedGameResult } from "./persistence";
 
 type Team = "p1" | "p2";
 type Phase = "home" | "deckMode" | "names" | "openingDraw" | "possession" | "play" | "pat" | "onsideChoice" | "suddenDeathStart" | "gameOver" | "rules" | "history";
@@ -53,35 +53,52 @@ const initial = (phase: Phase = "home"): Session => ({
 });
 const other = (team: Team): Team => team === "p1" ? "p2" : "p1";
 const uid = () => globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`;
-const readCachedState = () => {
+type CachedCollections = { players: PlayerProfile[]; gameResults: GameResult[] };
+const emptyCollections = (): CachedCollections => ({ players: [], gameResults: [] });
+const normalizeCachedCollections = (players: string | null, gameResults: string | null) => {
   try {
     return normalizeCloudStateForRuntime({
-      players: JSON.parse(localStorage.getItem("first-ten-players") || "[]"),
-      gameResults: JSON.parse(localStorage.getItem("first-ten-results") || "[]"),
+      players: JSON.parse(players || "[]"), gameResults: JSON.parse(gameResults || "[]"),
     }).state;
-  } catch { return { players: [] as PlayerProfile[], gameResults: [] as GameResult[] }; }
+  } catch { return emptyCollections(); }
+};
+const readLegacyCache = () => normalizeCachedCollections(
+  localStorage.getItem("first-ten-players"), localStorage.getItem("first-ten-results"),
+);
+const accountCacheKey = (userId: string, collection: "players" | "results") => `first-ten-account-${userId}-${collection}`;
+const readAccountCache = (userId: string) => normalizeCachedCollections(
+  localStorage.getItem(accountCacheKey(userId, "players")), localStorage.getItem(accountCacheKey(userId, "results")),
+);
+const writeAccountCache = (userId: string, state: CachedCollections) => {
+  try {
+    localStorage.setItem(accountCacheKey(userId, "players"), JSON.stringify(state.players));
+    localStorage.setItem(accountCacheKey(userId, "results"), JSON.stringify(state.gameResults));
+  } catch { /* cache is optional */ }
 };
 const readPendingSync = (userId: string) => {
   try {
-    const saved = JSON.parse(localStorage.getItem("first-ten-pending-sync") || "null");
-    return saved?.userId === userId ? normalizeCloudStateForRuntime(saved.state).state : null;
+    const scoped = JSON.parse(localStorage.getItem(`first-ten-pending-sync-${userId}`) || "null");
+    if (scoped) return normalizeCloudStateForRuntime(scoped).state;
+    const legacy = JSON.parse(localStorage.getItem("first-ten-pending-sync") || "null");
+    return legacy?.userId === userId ? normalizeCloudStateForRuntime(legacy.state).state : null;
   } catch { return null; }
 };
-const cachePendingSync = (userId: string, state: { players: PlayerProfile[]; gameResults: GameResult[] }) => {
-  try { localStorage.setItem("first-ten-pending-sync", JSON.stringify({ userId, state })); } catch { /* cache is optional */ }
+const cachePendingSync = (userId: string, state: CachedCollections) => {
+  try { localStorage.setItem(`first-ten-pending-sync-${userId}`, JSON.stringify(state)); } catch { /* cache is optional */ }
 };
 const clearPendingSync = (userId: string) => {
   try {
-    const saved = JSON.parse(localStorage.getItem("first-ten-pending-sync") || "null");
-    if (saved?.userId === userId) localStorage.removeItem("first-ten-pending-sync");
+    localStorage.removeItem(`first-ten-pending-sync-${userId}`);
+    const legacy = JSON.parse(localStorage.getItem("first-ten-pending-sync") || "null");
+    if (legacy?.userId === userId) localStorage.removeItem("first-ten-pending-sync");
   } catch { /* cache is optional */ }
 };
 
 export default function FirstAndTen() {
   const [session, setSession] = useState<Session>(() => initial());
   const [undoStack, setUndoStack] = useState<Session[]>([]);
-  const [players, setPlayers] = useState<PlayerProfile[]>(() => readCachedState().players);
-  const [games, setGames] = useState<GameResult[]>(() => readCachedState().gameResults);
+  const [players, setPlayers] = useState<PlayerProfile[]>([]);
+  const [games, setGames] = useState<GameResult[]>([]);
   const [selected, setSelected] = useState<Record<Team, string>>({ p1: "", p2: "" });
   const [newNames, setNewNames] = useState<Record<Team, string>>({ p1: "", p2: "" });
   const [offCard, setOffCard] = useState<Partial<Card>>({});
@@ -94,6 +111,7 @@ export default function FirstAndTen() {
   const [cloudError, setCloudError] = useState("");
   const [cloudErrorKind, setCloudErrorKind] = useState<"read" | "write" | null>(null);
   const [cloudStatus, setCloudStatus] = useState<"idle" | "saving" | "synced" | "error">("idle");
+  const [legacyImport, setLegacyImport] = useState<ReturnType<typeof legacyImportDelta>>(null);
   const [guestMode, setGuestMode] = useState(false);
   const [showRules, setShowRules] = useState(false);
   const [selectedVirtualCard, setSelectedVirtualCard] = useState("");
@@ -102,6 +120,7 @@ export default function FirstAndTen() {
   const pendingCloudState = useRef<{ players: PlayerProfile[]; gameResults: GameResult[] } | null>(null);
   const authoritativeCloudState = useRef<{ players: PlayerProfile[]; gameResults: GameResult[] } | null>(null);
   const cloudWriteSequence = useRef(0);
+  const dismissedLegacyImport = useRef(new Set<string>());
   const gameSaveLock = useRef(false);
   const [player2Kind, setPlayer2Kind] = useState<"human" | "cpu">("human");
   const [selectedCpuId, setSelectedCpuId] = useState<CpuId | null>(null);
@@ -130,6 +149,7 @@ export default function FirstAndTen() {
     let stopCloud: () => void = () => undefined;
     const stopAuth = watchAuth((user) => {
       stopCloud(); setCloudUser(user); setAuthReady(true); setCloudError(""); setCloudErrorKind(null); setCloudStatus("idle");
+      setPlayers([]); setGames([]); setLegacyImport(null); setSelected({ p1: "", p2: "" }); setSession(initial()); setUndoStack([]);
       pendingCloudState.current = user ? readPendingSync(user.uid) : null; authoritativeCloudState.current = null; cloudWriteSequence.current += 1;
       if (!user) { setCloudReady(false); return; }
       setGuestMode(false);
@@ -139,7 +159,8 @@ export default function FirstAndTen() {
           authoritativeCloudState.current = data;
           const visible = pendingCloudState.current ? mergeCloudStates(data, pendingCloudState.current) : data;
           setPlayers(visible.players); setGames(visible.gameResults);
-          try { localStorage.setItem("first-ten-players", JSON.stringify(visible.players)); localStorage.setItem("first-ten-results", JSON.stringify(visible.gameResults)); } catch { /* cache is optional */ }
+          writeAccountCache(user.uid, visible);
+          if (!dismissedLegacyImport.current.has(user.uid)) setLegacyImport(legacyImportDelta(data, readLegacyCache()));
           if (!pendingCloudState.current) setCloudStatus("synced");
           else {
             setCloudStatus("error"); setCloudErrorKind("write");
@@ -147,12 +168,15 @@ export default function FirstAndTen() {
           }
           setCloudReady(true);
         } else {
-          const cached = pendingCloudState.current ?? readCachedState();
-          void performCloudWrite(user, cached).finally(() => setCloudReady(true));
+          // A new account starts empty. Only a user-scoped failed write may be
+          // retried automatically; another account's device cache is ignored.
+          const initialState = pendingCloudState.current ?? emptyCollections();
+          void performCloudWrite(user, initialState).finally(() => setCloudReady(true));
         }
       }, () => {
         setCloudStatus("error"); setCloudErrorKind("read");
         setCloudError("We couldn't load your cloud history. Your saved data on this device is still available.");
+        const cached = readAccountCache(user.uid); setPlayers(cached.players); setGames(cached.gameResults);
         setCloudReady(true);
       });
     });
@@ -167,7 +191,7 @@ export default function FirstAndTen() {
 
   const persistCollections = (nextPlayers: PlayerProfile[], nextGames: GameResult[]) => {
     if (!cloudUser) return;
-    try { localStorage.setItem("first-ten-players", JSON.stringify(nextPlayers)); localStorage.setItem("first-ten-results", JSON.stringify(nextGames)); } catch { /* cache is optional */ }
+    writeAccountCache(cloudUser.uid, { players: nextPlayers, gameResults: nextGames });
     void performCloudWrite(cloudUser, { players: nextPlayers, gameResults: nextGames });
   };
   const retryCloudWrite = () => {
@@ -177,6 +201,17 @@ export default function FirstAndTen() {
       : pendingCloudState.current;
     setPlayers(retryState.players); setGames(retryState.gameResults);
     void performCloudWrite(cloudUser, retryState);
+  };
+  const importLegacyCache = () => {
+    if (!cloudUser || !legacyImport) return;
+    dismissedLegacyImport.current.add(cloudUser.uid);
+    const imported = legacyImport.state; setLegacyImport(null);
+    setPlayers(imported.players); setGames(imported.gameResults);
+    persistCollections(imported.players, imported.gameResults);
+  };
+  const ignoreLegacyCache = () => {
+    if (cloudUser) dismissedLegacyImport.current.add(cloudUser.uid);
+    setLegacyImport(null);
   };
   const nameOf = (t: Team, s = session) => s[t] || (t === "p1" ? "Player 1" : "Player 2");
   const accent = (t: Team) => t === "p1" ? "var(--p1)" : "var(--p2)";
@@ -533,6 +568,7 @@ export default function FirstAndTen() {
     <Header onRules={gameActive ? () => setShowRules(true) : undefined} />
     {!gameActive && <div className={`account-bar ${guestMode ? "guest" : ""}`}><span>{guestMode ? "Guest mode · profiles and history are off" : `● ${cloudStatus === "saving" ? "Saving to cloud" : cloudStatus === "error" ? "Cloud sync needs attention" : "Cloud synced"} · ${cloudUser?.email || "Google account"}`}</span><button onClick={() => guestMode ? setGuestMode(false) : void signOutOfCloud()}>{guestMode ? "Sign in for cloud sync" : "Sign out"}</button></div>}
     {cloudError && !gameActive && <div className="cloud-error" role="alert"><span>{cloudError}</span>{cloudErrorKind === "write" && pendingCloudState.current && <button type="button" onClick={retryCloudWrite}>Try again</button>}</div>}
+    {cloudUser && legacyImport && !gameActive && <section className="legacy-import" aria-labelledby="legacy-import-title"><div><strong id="legacy-import-title">Legacy device data found</strong><p>This browser has {legacyImport.gameCount} game{legacyImport.gameCount===1?"":"s"} and {legacyImport.playerCount} profile{legacyImport.playerCount===1?"":"s"} not stored in this cloud account. Nothing will be uploaded unless you explicitly import it. Only import if this data belongs to <b>{cloudUser.email || "this account"}</b>.</p></div><div className="legacy-import-actions"><button className="secondary" type="button" onClick={ignoreLegacyCache}>Ignore</button><button className="primary" type="button" onClick={importLegacyCache}>Import into this account</button></div></section>}
     {!gameActive && <nav className="tabs" aria-label="Primary">
       <button className={["home","deckMode","names","openingDraw","possession"].includes(session.phase) ? "active" : ""} onClick={() => navigate("deckMode")}>New Game</button>
       <button className={session.phase === "rules" ? "active" : ""} onClick={() => navigate("rules")}>Rules</button>

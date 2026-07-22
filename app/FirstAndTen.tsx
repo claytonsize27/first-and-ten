@@ -12,7 +12,7 @@ import {
 } from "./cpu-engine";
 import type { User } from "firebase/auth";
 import { cloudConfigured, saveCloudState, signInToCloud, signOutOfCloud, watchAuth, watchCloudState } from "./cloud-store";
-import { legacyImportDelta, mergeCloudStates, normalizeCloudStateForRuntime, PersistenceValidationError, toPersistedGameResult } from "./persistence";
+import { mergeCloudStates, normalizeCloudStateForRuntime, PersistenceValidationError, toPersistedGameResult } from "./persistence";
 
 type Team = "p1" | "p2";
 type Phase = "home" | "deckMode" | "names" | "openingDraw" | "possession" | "play" | "pat" | "onsideChoice" | "suddenDeathStart" | "gameOver" | "rules" | "history";
@@ -62,9 +62,6 @@ const normalizeCachedCollections = (players: string | null, gameResults: string 
     }).state;
   } catch { return emptyCollections(); }
 };
-const readLegacyCache = () => normalizeCachedCollections(
-  localStorage.getItem("first-ten-players"), localStorage.getItem("first-ten-results"),
-);
 const accountCacheKey = (userId: string, collection: "players" | "results") => `first-ten-account-${userId}-${collection}`;
 const readAccountCache = (userId: string) => normalizeCachedCollections(
   localStorage.getItem(accountCacheKey(userId, "players")), localStorage.getItem(accountCacheKey(userId, "results")),
@@ -111,7 +108,6 @@ export default function FirstAndTen() {
   const [cloudError, setCloudError] = useState("");
   const [cloudErrorKind, setCloudErrorKind] = useState<"read" | "write" | null>(null);
   const [cloudStatus, setCloudStatus] = useState<"idle" | "saving" | "synced" | "error">("idle");
-  const [legacyImport, setLegacyImport] = useState<ReturnType<typeof legacyImportDelta>>(null);
   const [guestMode, setGuestMode] = useState(false);
   const [showRules, setShowRules] = useState(false);
   const [selectedVirtualCard, setSelectedVirtualCard] = useState("");
@@ -120,7 +116,6 @@ export default function FirstAndTen() {
   const pendingCloudState = useRef<{ players: PlayerProfile[]; gameResults: GameResult[] } | null>(null);
   const authoritativeCloudState = useRef<{ players: PlayerProfile[]; gameResults: GameResult[] } | null>(null);
   const cloudWriteSequence = useRef(0);
-  const dismissedLegacyImport = useRef(new Set<string>());
   const gameSaveLock = useRef(false);
   const [player2Kind, setPlayer2Kind] = useState<"human" | "cpu">("human");
   const [selectedCpuId, setSelectedCpuId] = useState<CpuId | null>(null);
@@ -149,7 +144,7 @@ export default function FirstAndTen() {
     let stopCloud: () => void = () => undefined;
     const stopAuth = watchAuth((user) => {
       stopCloud(); setCloudUser(user); setAuthReady(true); setCloudError(""); setCloudErrorKind(null); setCloudStatus("idle");
-      setPlayers([]); setGames([]); setLegacyImport(null); setSelected({ p1: "", p2: "" }); setSession(initial()); setUndoStack([]);
+      setPlayers([]); setGames([]); setSelected({ p1: "", p2: "" }); setSession(initial()); setUndoStack([]);
       pendingCloudState.current = user ? readPendingSync(user.uid) : null; authoritativeCloudState.current = null; cloudWriteSequence.current += 1;
       if (!user) { setCloudReady(false); return; }
       setGuestMode(false);
@@ -160,7 +155,6 @@ export default function FirstAndTen() {
           const visible = pendingCloudState.current ? mergeCloudStates(data, pendingCloudState.current) : data;
           setPlayers(visible.players); setGames(visible.gameResults);
           writeAccountCache(user.uid, visible);
-          if (!dismissedLegacyImport.current.has(user.uid)) setLegacyImport(legacyImportDelta(data, readLegacyCache()));
           if (!pendingCloudState.current) setCloudStatus("synced");
           else {
             setCloudStatus("error"); setCloudErrorKind("write");
@@ -201,17 +195,6 @@ export default function FirstAndTen() {
       : pendingCloudState.current;
     setPlayers(retryState.players); setGames(retryState.gameResults);
     void performCloudWrite(cloudUser, retryState);
-  };
-  const importLegacyCache = () => {
-    if (!cloudUser || !legacyImport) return;
-    dismissedLegacyImport.current.add(cloudUser.uid);
-    const imported = legacyImport.state; setLegacyImport(null);
-    setPlayers(imported.players); setGames(imported.gameResults);
-    persistCollections(imported.players, imported.gameResults);
-  };
-  const ignoreLegacyCache = () => {
-    if (cloudUser) dismissedLegacyImport.current.add(cloudUser.uid);
-    setLegacyImport(null);
   };
   const nameOf = (t: Team, s = session) => s[t] || (t === "p1" ? "Player 1" : "Player 2");
   const accent = (t: Team) => t === "p1" ? "var(--p1)" : "var(--p2)";
@@ -568,7 +551,6 @@ export default function FirstAndTen() {
     <Header onRules={gameActive ? () => setShowRules(true) : undefined} />
     {!gameActive && <div className={`account-bar ${guestMode ? "guest" : ""}`}><span>{guestMode ? "Guest mode · profiles and history are off" : `● ${cloudStatus === "saving" ? "Saving to cloud" : cloudStatus === "error" ? "Cloud sync needs attention" : "Cloud synced"} · ${cloudUser?.email || "Google account"}`}</span><button onClick={() => guestMode ? setGuestMode(false) : void signOutOfCloud()}>{guestMode ? "Sign in for cloud sync" : "Sign out"}</button></div>}
     {cloudError && !gameActive && <div className="cloud-error" role="alert"><span>{cloudError}</span>{cloudErrorKind === "write" && pendingCloudState.current && <button type="button" onClick={retryCloudWrite}>Try again</button>}</div>}
-    {cloudUser && legacyImport && !gameActive && <section className="legacy-import" aria-labelledby="legacy-import-title"><div><strong id="legacy-import-title">Legacy device data found</strong><p>This browser has {legacyImport.gameCount} game{legacyImport.gameCount===1?"":"s"} and {legacyImport.playerCount} profile{legacyImport.playerCount===1?"":"s"} not stored in this cloud account. Nothing will be uploaded unless you explicitly import it. Only import if this data belongs to <b>{cloudUser.email || "this account"}</b>.</p></div><div className="legacy-import-actions"><button className="secondary" type="button" onClick={ignoreLegacyCache}>Ignore</button><button className="primary" type="button" onClick={importLegacyCache}>Import into this account</button></div></section>}
     {!gameActive && <nav className="tabs" aria-label="Primary">
       <button className={["home","deckMode","names","openingDraw","possession"].includes(session.phase) ? "active" : ""} onClick={() => navigate("deckMode")}>New Game</button>
       <button className={session.phase === "rules" ? "active" : ""} onClick={() => navigate("rules")}>Rules</button>

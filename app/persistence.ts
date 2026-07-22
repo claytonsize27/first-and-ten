@@ -213,15 +213,6 @@ export function mergeCloudStates(authoritative: { players: PlayerProfile[]; game
   return { players: mergeById(authoritative.players, pending.players), gameResults: mergeById(authoritative.gameResults, pending.gameResults) };
 }
 
-export function legacyImportDelta(authoritative: { players: PlayerProfile[]; gameResults: GameResult[] }, legacy: { players: PlayerProfile[]; gameResults: GameResult[] }) {
-  const playerIds = new Set(authoritative.players.map((player) => player.id));
-  const gameIds = new Set(authoritative.gameResults.map((game) => game.id));
-  const playerCount = legacy.players.filter((player) => !playerIds.has(player.id)).length;
-  const gameCount = legacy.gameResults.filter((game) => !gameIds.has(game.id)).length;
-  if (!playerCount && !gameCount) return null;
-  return { state: mergeCloudStates(authoritative, legacy), playerCount, gameCount };
-}
-
 export function mergePersistedCollectionById(existing: unknown, incoming: Array<{ id: string }>): unknown[] {
   const unkeyed: unknown[] = [], keyed = new Map<string, unknown>();
   for (const item of incoming) keyed.set(item.id, item);

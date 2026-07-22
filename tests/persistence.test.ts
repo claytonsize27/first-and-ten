@@ -3,7 +3,7 @@ import test from "node:test";
 import { CPU_PROFILES } from "../app/cpu-engine.ts";
 import { emptyPlayerGameStats, type GameResult } from "../app/game-engine.ts";
 import {
-  legacyImportDelta, mergeCloudStates, mergePersistedCollectionById, normalizeCloudStateForRuntime, PersistenceValidationError, sanitizeFirestorePlainData,
+  mergeCloudStates, mergePersistedCollectionById, normalizeCloudStateForRuntime, PersistenceValidationError, sanitizeFirestorePlainData,
   toPersistedCloudState, toPersistedGameResult,
 } from "../app/persistence.ts";
 
@@ -106,17 +106,6 @@ test("retry merging preserves authoritative records and adds only new local IDs"
   assert.deepEqual(merged.gameResults.map((game) => game.id), ["cloud", "shared"]);
   assert.equal(merged.gameResults.find((game) => game.id === "shared")?.p1Score, 7);
   assert.equal(merged.players.length, 2);
-});
-
-test("legacy cache import is explicit, additive, and keeps cloud collisions authoritative", () => {
-  const cloud = { players: [{ id: "p1", name: "Cloud", createdAt: 1 }], gameResults: [currentGame({ id: "shared", p1Score: 7 })] };
-  const legacy = { players: [{ id: "p1", name: "Stale", createdAt: 0 }, { id: "p2", name: "Local", createdAt: 2 }], gameResults: [currentGame({ id: "shared", p1Score: 99 }), currentGame({ id: "new" })] };
-  const delta = legacyImportDelta(cloud, legacy);
-  assert.equal(delta?.playerCount, 1);
-  assert.equal(delta?.gameCount, 1);
-  assert.equal(delta?.state.players.find((player) => player.id === "p1")?.name, "Cloud");
-  assert.equal(delta?.state.gameResults.find((game) => game.id === "shared")?.p1Score, 7);
-  assert.equal(legacyImportDelta(cloud, cloud), null);
 });
 
 test("whole-document writes append new IDs without replacing authoritative records", () => {

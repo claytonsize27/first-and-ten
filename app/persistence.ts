@@ -207,7 +207,7 @@ export function normalizeCloudStateForRuntime(data: unknown): { state: { players
 export function mergeCloudStates(authoritative: { players: PlayerProfile[]; gameResults: GameResult[] }, pending: { players: PlayerProfile[]; gameResults: GameResult[] }) {
   const mergeById = <T extends { id: string }>(cloud: T[], local: T[]) => {
     const merged = new Map(cloud.map((item) => [item.id, item]));
-    for (const item of local) merged.set(item.id, item);
+    for (const item of local) if (!merged.has(item.id)) merged.set(item.id, item);
     return [...merged.values()];
   };
   return { players: mergeById(authoritative.players, pending.players), gameResults: mergeById(authoritative.gameResults, pending.gameResults) };
@@ -224,25 +224,6 @@ export function mergePersistedCollectionById(existing: unknown, incoming: Array<
     } else unkeyed.push(item);
   }
   return [...unkeyed, ...keyed.values()];
-}
-
-export function recoverLegacyPendingState(authoritative: { players: PlayerProfile[]; gameResults: GameResult[] }, cached: { players: PlayerProfile[]; gameResults: GameResult[] }) {
-  const cloudPlayerIds = new Set(authoritative.players.map((player) => player.id));
-  const cloudPlayerNames = new Set(authoritative.players.map((player) => player.name.trim().toLocaleLowerCase()));
-  const sameAccountEvidence = cached.players.some((player) => cloudPlayerIds.has(player.id))
-    || cached.players.some((player) => cloudPlayerNames.has(player.name.trim().toLocaleLowerCase()))
-    || cached.gameResults.some((game) => cloudPlayerIds.has(game.p1PlayerId) || cloudPlayerIds.has(game.p2PlayerId));
-  if (!sameAccountEvidence) return null;
-
-  const cloudProfileIds = new Set(authoritative.players.map((player) => player.id));
-  const cloudGameIds = new Set(authoritative.gameResults.map((game) => game.id));
-  const missingPlayers = cached.players.filter((player) => !cloudProfileIds.has(player.id));
-  const missingGames = cached.gameResults.filter((game) => !cloudGameIds.has(game.id));
-  if (!missingPlayers.length && !missingGames.length) return null;
-  return {
-    players: [...authoritative.players, ...missingPlayers],
-    gameResults: [...authoritative.gameResults, ...missingGames],
-  };
 }
 
 export const isCpuIdForPersistence = (value: string): value is CpuId => CPU_PROFILES.some((profile) => profile.id === value);

@@ -23,7 +23,9 @@ export function watchAuth(callback: (user: User | null) => void) {
 
 export async function signInToCloud() {
   if (!auth) throw new Error("Cloud sync is not configured yet.");
-  return signInWithPopup(auth, new GoogleAuthProvider());
+  const provider = new GoogleAuthProvider();
+  provider.setCustomParameters({ prompt: "select_account" });
+  return signInWithPopup(auth, provider);
 }
 
 export async function signOutOfCloud() {

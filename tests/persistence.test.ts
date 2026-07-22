@@ -3,7 +3,7 @@ import test from "node:test";
 import { CPU_PROFILES } from "../app/cpu-engine.ts";
 import { emptyPlayerGameStats, type GameResult } from "../app/game-engine.ts";
 import {
-  mergeCloudStates, normalizeCloudStateForRuntime, PersistenceValidationError, sanitizeFirestorePlainData,
+  mergeCloudStates, normalizeCloudStateForRuntime, PersistenceValidationError, recoverLegacyPendingState, sanitizeFirestorePlainData,
   toPersistedCloudState, toPersistedGameResult,
 } from "../app/persistence.ts";
 
@@ -106,6 +106,16 @@ test("retry merging preserves authoritative records and de-duplicates stable loc
   assert.deepEqual(merged.gameResults.map((game) => game.id), ["cloud", "shared"]);
   assert.equal(merged.gameResults.find((game) => game.id === "shared")?.p1Score, 14);
   assert.equal(merged.players.length, 2);
+});
+
+test("legacy failed saves recover only missing IDs with same-account evidence", () => {
+  const profile = { id: "player-1", name: "Austin", createdAt: 1 };
+  const cloud = { players: [profile], gameResults: [currentGame()] };
+  const localOnly = currentGame({ id: "local-only", p1Score: 21 });
+  const recovered = recoverLegacyPendingState(cloud, { players: [profile], gameResults: [currentGame({ p1Score: 99 }), localOnly] });
+  assert.deepEqual(recovered?.gameResults.map((game) => game.id), ["game-1", "local-only"]);
+  assert.equal(recovered?.gameResults[0].p1Score, 7, "authoritative copy must not be overwritten");
+  assert.equal(recoverLegacyPendingState(cloud, { players: [{ id: "other", name: "Other", createdAt: 2 }], gameResults: [] }), null);
 });
 
 test("cloud mapping removes nested undefined without losing valid records", () => {

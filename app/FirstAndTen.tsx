@@ -12,7 +12,7 @@ import {
 } from "./cpu-engine";
 import type { User } from "firebase/auth";
 import { cloudConfigured, saveCloudState, signInToCloud, signOutOfCloud, watchAuth, watchCloudState } from "./cloud-store";
-import { mergeCloudStates, normalizeCloudStateForRuntime, PersistenceValidationError, toPersistedGameResult } from "./persistence";
+import { mergeCloudStates, normalizeCloudStateForRuntime, PersistenceValidationError, recoverLegacyPendingState, toPersistedGameResult } from "./persistence";
 
 type Team = "p1" | "p2";
 type Phase = "home" | "deckMode" | "names" | "openingDraw" | "possession" | "play" | "pat" | "onsideChoice" | "suddenDeathStart" | "gameOver" | "rules" | "history";
@@ -136,6 +136,10 @@ export default function FirstAndTen() {
       setCloudReady(false);
       stopCloud = watchCloudState(user.uid, (data) => {
         if (data) {
+          if (!pendingCloudState.current) {
+            const recovered = recoverLegacyPendingState(data, readCachedState());
+            if (recovered) { pendingCloudState.current = recovered; cachePendingSync(user.uid, recovered); }
+          }
           authoritativeCloudState.current = data;
           const visible = pendingCloudState.current ? mergeCloudStates(data, pendingCloudState.current) : data;
           setPlayers(visible.players); setGames(visible.gameResults);
